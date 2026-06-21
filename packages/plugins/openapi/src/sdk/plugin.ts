@@ -45,6 +45,11 @@ import { annotationsForOperation, invokeWithLayer } from "./invoke";
 import { previewSpec, previewSpecText, type SpecPreview } from "./preview";
 import { deriveAuthenticationTemplateFromPreview, firstBaseUrlForPreview } from "./derive-auth";
 import { openApiPresets } from "./presets";
+import {
+  googleOAuthConsentScopesForPreset,
+  googlePhotosOpenApiPresets,
+  googlePhotosPresetIds,
+} from "./google-presets";
 import { makeDefaultOpenapiStore, type OpenapiStore, type StoredOperation } from "./store";
 import type { Authentication } from "./types";
 import { OperationBinding, normalizeOpenApiAuthInputs, type AuthenticationInput } from "./types";
@@ -669,7 +674,37 @@ const fetchGoogleDiscoveryBundleConversion = (
         Effect.map((documentText) => ({ discoveryUrl: url, documentText })),
       ),
     { concurrency: 4 },
-  ).pipe(Effect.flatMap((documents) => convertGoogleDiscoveryBundleToOpenApi({ documents })));
+  ).pipe(
+    Effect.flatMap((documents) => {
+      const consentScopes = googlePhotosBundleConsentScopes(urls);
+      return convertGoogleDiscoveryBundleToOpenApi({
+        documents,
+        ...(consentScopes ? { consentScopes } : {}),
+      });
+    }),
+  );
+
+const normalizeGoogleDiscoveryPresetUrl = (url: string): string => {
+  const trimmed = url.trim();
+  if (!URL.canParse(trimmed)) return trimmed.replace(/\/$/, "");
+  const parsed = new URL(trimmed);
+  parsed.hash = "";
+  parsed.searchParams.sort();
+  return parsed.toString().replace(/\/$/, "");
+};
+
+const googlePhotosBundleUrls = new Set(
+  googlePhotosOpenApiPresets.flatMap((preset) =>
+    preset.url ? [normalizeGoogleDiscoveryPresetUrl(preset.url)] : [],
+  ),
+);
+
+const googlePhotosBundleConsentScopes = (urls: readonly string[]): readonly string[] | null => {
+  const normalized = urls.map(normalizeGoogleDiscoveryPresetUrl);
+  if (normalized.length !== googlePhotosBundleUrls.size) return null;
+  if (!normalized.every((url) => googlePhotosBundleUrls.has(url))) return null;
+  return googlePhotosPresetIds.flatMap((presetId) => googleOAuthConsentScopesForPreset(presetId));
+};
 
 export const openApiPlugin = definePlugin((options?: OpenApiPluginOptions) => {
   const resolveSpecForInput = (

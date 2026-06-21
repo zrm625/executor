@@ -3,6 +3,7 @@ import type { OpenApiPreset } from "./presets";
 export type GoogleOpenApiOAuthAudience =
   | "standard-user"
   | "advanced-user"
+  | "limited-user"
   | "workspace-admin"
   | "unsupported-user";
 
@@ -14,15 +15,48 @@ const gd = (service: string, version: string) =>
   `https://www.googleapis.com/discovery/v1/apis/${service}/${version}/rest`;
 
 const GOOGLE_G = "https://fonts.gstatic.com/s/i/productlogos/googleg/v6/192px.svg";
+export const GOOGLE_PHOTOS_ICON =
+  "https://www.gstatic.com/images/branding/product/2x/photos_96dp.png";
 export const GOOGLE_BUNDLE_PRESET_ID = "google";
+export const GOOGLE_PHOTOS_PRESET_ID = "google-photos";
 
 export const googleOpenApiBundlePreset: OpenApiPreset = {
   id: GOOGLE_BUNDLE_PRESET_ID,
   name: "Google",
-  summary: "Bundle Gmail, Calendar, Drive, Docs, and other Google APIs into one source.",
+  summary: "Advanced bundle for Gmail, Drive, Calendar, Docs, and other Google APIs.",
   icon: GOOGLE_G,
-  featured: true,
 };
+
+export const googlePhotosOpenApiBundlePreset: OpenApiPreset = {
+  id: GOOGLE_PHOTOS_PRESET_ID,
+  name: "Google Photos",
+  summary: "Upload media, manage app-created albums, and use selected Google Photos items.",
+  icon: GOOGLE_PHOTOS_ICON,
+};
+
+export const googlePhotosPresetIds: readonly string[] = [
+  "google-photos-library",
+  "google-photos-picker",
+];
+
+export const googlePhotosOpenApiPresets: readonly GoogleOpenApiPreset[] = [
+  {
+    id: "google-photos-library",
+    name: "Albums and uploads",
+    summary: "Upload media and manage app-created albums.",
+    url: gd("photoslibrary", "v1"),
+    icon: GOOGLE_PHOTOS_ICON,
+    oauthAudience: "limited-user",
+  },
+  {
+    id: "google-photos-picker",
+    name: "Selected media",
+    summary: "Use existing photos and videos the user selects.",
+    url: "https://photospicker.googleapis.com/$discovery/rest?version=v1",
+    icon: GOOGLE_PHOTOS_ICON,
+    oauthAudience: "limited-user",
+  },
+];
 
 export const googleOpenApiPresets: readonly GoogleOpenApiPreset[] = [
   {
@@ -101,22 +135,6 @@ export const googleOpenApiPresets: readonly GoogleOpenApiPreset[] = [
     url: gd("people", "v1"),
     icon: "https://fonts.gstatic.com/s/i/productlogos/contacts_2022/v2/192px.svg",
     oauthAudience: "standard-user",
-  },
-  {
-    id: "google-photos-library",
-    name: "Google Photos Library",
-    summary: "Albums, uploads, and app-created media through Google Photos.",
-    url: gd("photoslibrary", "v1"),
-    icon: "https://www.gstatic.com/images/branding/product/2x/photos_96dp.png",
-    oauthAudience: "advanced-user",
-  },
-  {
-    id: "google-photos-picker",
-    name: "Google Photos Picker",
-    summary: "Picker sessions and user-selected Google Photos media items.",
-    url: "https://photospicker.googleapis.com/$discovery/rest?version=v1",
-    icon: "https://www.gstatic.com/images/branding/product/2x/photos_96dp.png",
-    oauthAudience: "advanced-user",
   },
   {
     id: "google-chat",
@@ -251,8 +269,8 @@ export const googleOAuthConsentScopesForPreset = (presetId: string): readonly st
 // ---------------------------------------------------------------------------
 // Resolve a stored/normalized Discovery URL back to its preset, so a bundled
 // `google` integration can surface each selected API's `oauthAudience` (e.g. a
-// caution on a connection's auth method when admin-only or unsupported-consent
-// APIs are part of the bundle).
+// caution on a connection's auth method when limited, admin-only, or
+// unsupported-consent APIs are part of the bundle).
 // ---------------------------------------------------------------------------
 
 const normalizeGooglePresetUrl = (url: string): string => {
@@ -265,7 +283,7 @@ const normalizeGooglePresetUrl = (url: string): string => {
 };
 
 const googlePresetsByNormalizedUrl: ReadonlyMap<string, GoogleOpenApiPreset> = new Map(
-  googleOpenApiPresets.flatMap((preset) =>
+  [...googleOpenApiPresets, ...googlePhotosOpenApiPresets].flatMap((preset) =>
     preset.url ? [[normalizeGooglePresetUrl(preset.url), preset] as const] : [],
   ),
 );
@@ -273,16 +291,22 @@ const googlePresetsByNormalizedUrl: ReadonlyMap<string, GoogleOpenApiPreset> = n
 export const googlePresetForDiscoveryUrl = (url: string): GoogleOpenApiPreset | undefined =>
   googlePresetsByNormalizedUrl.get(normalizeGooglePresetUrl(url));
 
-/** The distinct caution-tier audiences (`workspace-admin`, `unsupported-user`)
- *  among the supplied Discovery URLs — the ones whose consent the user should be
- *  warned about. Returns `[]` when every URL is a standard/advanced API. */
+/** The distinct caution-tier audiences among the supplied Discovery URLs — the
+ *  ones whose consent the user should be warned about. Returns `[]` when every
+ *  URL is a standard/advanced API. */
 export const googleAudienceWarningsForUrls = (
   urls: readonly string[],
 ): readonly GoogleOpenApiOAuthAudience[] => {
   const seen = new Set<GoogleOpenApiOAuthAudience>();
   for (const url of urls) {
     const audience = googlePresetForDiscoveryUrl(url)?.oauthAudience;
-    if (audience === "workspace-admin" || audience === "unsupported-user") seen.add(audience);
+    if (
+      audience === "limited-user" ||
+      audience === "workspace-admin" ||
+      audience === "unsupported-user"
+    ) {
+      seen.add(audience);
+    }
   }
   return [...seen];
 };

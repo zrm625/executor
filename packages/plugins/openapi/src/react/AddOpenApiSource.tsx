@@ -3,6 +3,7 @@ import { useAtomSet } from "@effect/atom-react";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
+import { TriangleAlert } from "lucide-react";
 
 import { IntegrationSlug } from "@executor-js/sdk/shared";
 import { integrationWriteKeys } from "@executor-js/react/api/reactivity-keys";
@@ -11,6 +12,7 @@ import {
   useIntegrationIdentity,
 } from "@executor-js/react/plugins/integration-identity";
 import { Button } from "@executor-js/react/components/button";
+import { Alert, AlertDescription, AlertTitle } from "@executor-js/react/components/alert";
 import {
   AuthMethodListEditor,
   useAuthMethodList,
@@ -41,7 +43,11 @@ import { GoogleProductPicker } from "./GoogleProductPicker";
 import { openApiPresets } from "../sdk/presets";
 import {
   GOOGLE_BUNDLE_PRESET_ID,
+  GOOGLE_PHOTOS_ICON,
+  GOOGLE_PHOTOS_PRESET_ID,
   googleOpenApiPresets,
+  googlePhotosOpenApiPresets,
+  googlePhotosPresetIds,
   type GoogleOpenApiPreset,
 } from "../sdk/google-presets";
 import type { SpecPreview } from "../sdk/preview";
@@ -58,11 +64,14 @@ const googleBundleDefaultPresetIds: ReadonlySet<string> = new Set(
     .map((preset: GoogleOpenApiPreset) => preset.id),
 );
 
+const googlePhotosDefaultPresetIds: ReadonlySet<string> = new Set(googlePhotosPresetIds);
+
 const googleBundleUrls = (
   selectedPresetIds: ReadonlySet<string>,
   customUrls: readonly string[],
+  presets: readonly GoogleOpenApiPreset[] = googleOpenApiPresets,
 ): readonly string[] => {
-  const fromPresets = googleOpenApiPresets.flatMap((preset: GoogleOpenApiPreset) =>
+  const fromPresets = presets.flatMap((preset: GoogleOpenApiPreset) =>
     preset.url && selectedPresetIds.has(preset.id) ? [preset.url] : [],
   );
   // Preset URLs first (stable order), then any custom Discovery URLs, de-duped.
@@ -117,6 +126,8 @@ export default function AddOpenApiSource(props: {
   initialNamespace?: string;
 }) {
   const isGoogleBundlePreset = props.initialPreset === GOOGLE_BUNDLE_PRESET_ID;
+  const isGooglePhotosPreset = props.initialPreset === GOOGLE_PHOTOS_PRESET_ID;
+  const isGoogleProductPreset = isGoogleBundlePreset || isGooglePhotosPreset;
 
   // Spec input. For the Google BUNDLE preset the input is a product picker (a set
   // of selected Discovery URLs), not a single spec URL/blob — the merge happens
@@ -124,7 +135,7 @@ export default function AddOpenApiSource(props: {
   // preview path is bypassed entirely.
   const [specUrl, setSpecUrl] = useState(props.initialUrl ?? "");
   const [selectedPresetIds, setSelectedPresetIds] = useState<ReadonlySet<string>>(
-    googleBundleDefaultPresetIds,
+    isGooglePhotosPreset ? googlePhotosDefaultPresetIds : googleBundleDefaultPresetIds,
   );
   const [customDiscoveryUrls, setCustomDiscoveryUrls] = useState<readonly string[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
@@ -138,17 +149,26 @@ export default function AddOpenApiSource(props: {
   const [descriptionDraft, setDescriptionDraft] = useState<string | null>(null);
   const identityFallbackName = isGoogleBundlePreset
     ? "Google"
-    : preview
-      ? Option.getOrElse(preview.title, () => "")
-      : "";
+    : isGooglePhotosPreset
+      ? "Google Photos"
+      : preview
+        ? Option.getOrElse(preview.title, () => "")
+        : "";
   const identity = useIntegrationIdentity({
     fallbackName: identityFallbackName,
-    fallbackNamespace: props.initialNamespace ?? (isGoogleBundlePreset ? "google" : undefined),
+    fallbackNamespace:
+      props.initialNamespace ??
+      (isGoogleBundlePreset ? "google" : isGooglePhotosPreset ? "google_photos" : undefined),
   });
 
   const bundleDiscoveryUrls = useMemo(
-    () => googleBundleUrls(selectedPresetIds, customDiscoveryUrls),
-    [selectedPresetIds, customDiscoveryUrls],
+    () =>
+      googleBundleUrls(
+        selectedPresetIds,
+        customDiscoveryUrls,
+        isGooglePhotosPreset ? googlePhotosOpenApiPresets : googleOpenApiPresets,
+      ),
+    [selectedPresetIds, customDiscoveryUrls, isGooglePhotosPreset],
   );
 
   const toggleBundlePreset = useCallback((presetId: string, checked: boolean) => {
@@ -185,7 +205,7 @@ export default function AddOpenApiSource(props: {
 
   useEffect(() => {
     // The bundle preset never analyzes a single spec — its input is the picker.
-    if (isGoogleBundlePreset) return;
+    if (isGoogleProductPreset) return;
     const trimmed = specUrl.trim();
     if (!trimmed) return;
     if (preview) return;
@@ -193,7 +213,7 @@ export default function AddOpenApiSource(props: {
       handleAnalyzeRef.current();
     }, 400);
     return () => clearTimeout(handle);
-  }, [specUrl, preview, isGoogleBundlePreset]);
+  }, [specUrl, preview, isGoogleProductPreset]);
 
   // ---- Derived state ----
 
@@ -285,7 +305,9 @@ export default function AddOpenApiSource(props: {
   // successful preview. Both require a base URL and a free slug.
   const hasPreviewOrBundle = isGoogleBundlePreset
     ? bundleDiscoveryUrls.length > 0
-    : preview !== null;
+    : isGooglePhotosPreset
+      ? bundleDiscoveryUrls.length > 0
+      : preview !== null;
   // The base URL is optional when the spec declares servers (resolved per call);
   // required only when it doesn't.
   const canAdd =
@@ -322,7 +344,7 @@ export default function AddOpenApiSource(props: {
     // the unioned `googleOAuth2` auth template (so no client template is sent).
     // Every other preset/custom input keeps the single-spec url/blob/discovery
     // branch unchanged.
-    const specForAdd = isGoogleBundlePreset
+    const specForAdd = isGoogleProductPreset
       ? ({ kind: "googleDiscoveryBundle" as const, urls: [...bundleDiscoveryUrls] } satisfies {
           readonly kind: "googleDiscoveryBundle";
           readonly urls: readonly string[];
@@ -343,7 +365,7 @@ export default function AddOpenApiSource(props: {
         // spec — which would silently resurrect methods the user deleted.
         // The Google bundle path stays omitted; its auth is converter-derived
         // server-side.
-        ...(!isGoogleBundlePreset
+        ...(!isGoogleProductPreset
           ? {
               // Serialize to the wire input dialect (apikey → request-shaped).
               authenticationTemplate: editedAuthenticationTemplate.map(openApiWireAuthInput),
@@ -358,7 +380,7 @@ export default function AddOpenApiSource(props: {
     }
     return exit.value.slug;
   }, [
-    isGoogleBundlePreset,
+    isGoogleProductPreset,
     bundleDiscoveryUrls,
     specUrl,
     doAdd,
@@ -388,24 +410,42 @@ export default function AddOpenApiSource(props: {
     <div className="flex flex-1 flex-col gap-6">
       <div>
         <h1 className="text-xl font-semibold text-foreground">
-          {isGoogleBundlePreset ? "Add Google" : "Add OpenAPI Integration"}
+          {isGooglePhotosPreset
+            ? "Add Google Photos"
+            : isGoogleBundlePreset
+              ? "Add Google"
+              : "Add OpenAPI Integration"}
         </h1>
-        {isGoogleBundlePreset ? (
+        {isGoogleProductPreset ? (
           <p className="mt-1 text-[13px] text-muted-foreground">
-            Bundle Google APIs into one integration from their Discovery documents and register
-            their methods as tools under a single shared OAuth consent.
+            {isGooglePhotosPreset
+              ? "Connect Google Photos as one integration with one shared OAuth consent."
+              : "Bundle Google APIs into one integration from their Discovery documents and register their methods as tools under a single shared OAuth consent."}
           </p>
         ) : null}
       </div>
 
-      {isGoogleBundlePreset ? (
-        <GoogleProductPicker
-          selectedPresetIds={selectedPresetIds}
-          onToggle={toggleBundlePreset}
-          customUrls={customDiscoveryUrls}
-          onAddCustomUrl={addCustomDiscoveryUrl}
-          onRemoveCustomUrl={removeCustomDiscoveryUrl}
-        />
+      {isGoogleProductPreset ? (
+        <>
+          {isGooglePhotosPreset ? <GooglePhotosLimitationsAlert /> : null}
+          {isGoogleBundlePreset ? <GoogleBundleOAuthAlert /> : null}
+          <GoogleProductPicker
+            presets={isGooglePhotosPreset ? googlePhotosOpenApiPresets : googleOpenApiPresets}
+            selectedPresetIds={selectedPresetIds}
+            onToggle={toggleBundlePreset}
+            customUrls={customDiscoveryUrls}
+            onAddCustomUrl={addCustomDiscoveryUrl}
+            onRemoveCustomUrl={removeCustomDiscoveryUrl}
+            visiblePresetIds={isGooglePhotosPreset ? googlePhotosDefaultPresetIds : undefined}
+            title={isGooglePhotosPreset ? "Google Photos" : undefined}
+            description={
+              isGooglePhotosPreset
+                ? "Upload media, manage app-created albums, and use existing photos or videos the user selects."
+                : undefined
+            }
+            hideCustomUrls={isGooglePhotosPreset}
+          />
+        </>
       ) : !preview ? (
         <CardStack>
           <CardStackContent className="border-t-0">
@@ -434,9 +474,9 @@ export default function AddOpenApiSource(props: {
         </CardStack>
       ) : null}
 
-      {isGoogleBundlePreset ? (
+      {isGoogleProductPreset ? (
         <OpenApiSourceDetailsFields
-          title="Google"
+          title={isGooglePhotosPreset ? "Google Photos" : "Google"}
           subtitle={`${bundleDiscoveryUrls.length} Google API${
             bundleDiscoveryUrls.length !== 1 ? "s" : ""
           } · one shared OAuth consent`}
@@ -446,7 +486,7 @@ export default function AddOpenApiSource(props: {
           baseUrl={resolvedBaseUrl}
           onBaseUrlChange={setBaseUrl}
           baseUrlLabel="Base URL override (optional)"
-          faviconIcon={GOOGLE_BUNDLE_FAVICON}
+          faviconIcon={isGooglePhotosPreset ? GOOGLE_PHOTOS_ICON : GOOGLE_BUNDLE_FAVICON}
           faviconUrl={resolvedBaseUrl}
         />
       ) : preview ? (
@@ -488,7 +528,7 @@ export default function AddOpenApiSource(props: {
 
       {analyzeError && <FormErrorAlert message={analyzeError} />}
 
-      {preview && !isGoogleBundlePreset && (
+      {preview && !isGoogleProductPreset && (
         <AuthMethodListEditor
           list={authMethodList}
           emptyHint="No authentication detected. Add a method, or add the integration without auth and connect an account from the integration page later."
@@ -506,13 +546,45 @@ export default function AddOpenApiSource(props: {
         <Button variant="ghost" onClick={() => props.onCancel()} disabled={adding}>
           Cancel
         </Button>
-        {(hasPreviewOrBundle || isGoogleBundlePreset) && (
+        {(hasPreviewOrBundle || isGoogleProductPreset) && (
           <Button onClick={() => void handleAdd()} disabled={!canAdd || adding}>
             {adding && <Spinner className="size-3.5" />}
-            {adding ? "Adding…" : isGoogleBundlePreset ? "Connect Google" : "Add integration"}
+            {adding
+              ? "Adding…"
+              : isGooglePhotosPreset
+                ? "Connect Google Photos"
+                : isGoogleBundlePreset
+                  ? "Connect Google"
+                  : "Add integration"}
           </Button>
         )}
       </FloatActions>
     </div>
+  );
+}
+
+function GoogleBundleOAuthAlert() {
+  return (
+    <Alert className="border-amber-500/30 bg-amber-500/5">
+      <TriangleAlert className="text-amber-600 dark:text-amber-400" />
+      <AlertTitle>Generic Google OAuth is broad</AlertTitle>
+      <AlertDescription>
+        This bundle can request sensitive Google scopes across the selected products. Use a
+        dedicated OAuth app configured for those scopes.
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+function GooglePhotosLimitationsAlert() {
+  return (
+    <Alert className="border-amber-500/30 bg-amber-500/5">
+      <TriangleAlert className="text-amber-600 dark:text-amber-400" />
+      <AlertTitle>Google Photos limitations</AlertTitle>
+      <AlertDescription>
+        Arbitrary pre-existing or shared albums usually cannot be managed unless Google exposes them
+        to this app and OAuth scope.
+      </AlertDescription>
+    </Alert>
   );
 }

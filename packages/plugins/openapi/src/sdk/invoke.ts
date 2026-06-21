@@ -170,6 +170,33 @@ const isTextContentType = (ct: string | null | undefined): boolean =>
 const isOctetStream = (ct: string | null | undefined): boolean =>
   normalizeContentType(ct) === "application/octet-stream";
 
+const denseByteRecordToUint8Array = (value: Record<string, unknown>): Uint8Array | null => {
+  const keys = Object.keys(value);
+  if (keys.length === 0) return null;
+
+  const indices: number[] = [];
+  for (const key of keys) {
+    if (!/^(0|[1-9]\d*)$/.test(key)) return null;
+    const index = Number(key);
+    if (!Number.isSafeInteger(index)) return null;
+    indices.push(index);
+  }
+
+  if (new Set(indices).size !== keys.length) return null;
+  const maxIndex = Math.max(...indices);
+  if (maxIndex !== keys.length - 1) return null;
+
+  const bytes = new Uint8Array(keys.length);
+  for (let index = 0; index < keys.length; index++) {
+    const byte = value[String(index)];
+    if (typeof byte !== "number" || !Number.isInteger(byte) || byte < 0 || byte > 255) {
+      return null;
+    }
+    bytes[index] = byte;
+  }
+  return bytes;
+};
+
 const toUint8Array = (value: unknown): Uint8Array | null => {
   if (value instanceof Uint8Array) return value;
   if (value instanceof ArrayBuffer) return new Uint8Array(value);
@@ -179,6 +206,9 @@ const toUint8Array = (value: unknown): Uint8Array | null => {
   }
   if (Array.isArray(value) && value.every((v) => typeof v === "number")) {
     return new Uint8Array(value as readonly number[]);
+  }
+  if (typeof value === "object" && value !== null) {
+    return denseByteRecordToUint8Array(value as Record<string, unknown>);
   }
   return null;
 };

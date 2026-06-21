@@ -15,6 +15,7 @@ import {
   googleOAuthConsentScopes,
   googleOAuthConsentScopesForPreset,
   googleOpenApiPresets,
+  googlePhotosOpenApiPresets,
   googlePresetForDiscoveryUrl,
   type GoogleOpenApiPreset,
 } from "./google-presets";
@@ -32,11 +33,12 @@ const batchInputsFor = (presetIds: readonly string[]) =>
     }));
 
 it("declares representative consent scopes for every Google preset", () => {
-  for (const preset of googleOpenApiPresets) {
+  const presets = [...googleOpenApiPresets, ...googlePhotosOpenApiPresets];
+  for (const preset of presets) {
     expect(googleOAuthConsentScopesForPreset(preset.id).length).toBeGreaterThan(0);
   }
   // No stray keys for presets that no longer exist.
-  const presetIds = new Set(googleOpenApiPresets.map((preset) => preset.id));
+  const presetIds = new Set(presets.map((preset) => preset.id));
   for (const key of Object.keys(googleOAuthConsentScopes)) {
     expect(presetIds.has(key)).toBe(true);
   }
@@ -75,16 +77,17 @@ it("maps stored Discovery URLs back to presets and flags caution-tier audiences"
     ]),
   ).toEqual([]);
 
-  // Admin-only (Chat) and unsupported-consent (Keep) APIs both flag.
+  // Limited (Photos), admin-only (Chat), and unsupported-consent (Keep) APIs all flag.
   expect(
     [
       ...googleAudienceWarningsForUrls([
+        "https://www.googleapis.com/discovery/v1/apis/photoslibrary/v1/rest",
         "https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest",
         "https://www.googleapis.com/discovery/v1/apis/chat/v1/rest",
         "https://keep.googleapis.com/$discovery/rest?version=v1",
       ]),
     ].sort(),
-  ).toEqual(["unsupported-user", "workspace-admin"]);
+  ).toEqual(["limited-user", "unsupported-user", "workspace-admin"]);
 });
 
 it("previews a consent set that matches what the bundle persists (compaction parity)", () => {

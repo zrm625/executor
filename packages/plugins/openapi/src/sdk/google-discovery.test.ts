@@ -602,3 +602,183 @@ it.effect("compacts and filters the merged bundle scope set into a clean consent
     ]);
   }),
 );
+
+it.effect("adds Google Photos raw upload on the Photos Library API server", () =>
+  Effect.gen(function* () {
+    const result = yield* convertGoogleDiscoveryToOpenApi({
+      discoveryUrl: "https://www.googleapis.com/discovery/v1/apis/photoslibrary/v1/rest",
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      documentText: JSON.stringify({
+        name: "photoslibrary",
+        version: "v1",
+        title: "Google Photos",
+        rootUrl: "https://photoslibrary.googleapis.com/",
+        servicePath: "v1/",
+        auth: {
+          oauth2: {
+            scopes: {
+              "https://www.googleapis.com/auth/photoslibrary.appendonly": {
+                description: "Upload to Google Photos",
+              },
+            },
+          },
+        },
+        methods: {},
+        schemas: {},
+      }),
+    });
+
+    const spec = decodeConvertedSpec(result.specText);
+    const upload = spec.paths["/uploads"]?.post;
+    expect(upload?.operationId).toBe("mediaItems.upload");
+    expect(upload?.servers).toEqual([{ url: "https://photoslibrary.googleapis.com/v1/" }]);
+    expect(spec.servers).toEqual([{ url: "https://photoslibrary.googleapis.com/v1/" }]);
+  }),
+);
+
+it.effect("can constrain Google Photos bundle consent scopes and exposed operations", () =>
+  Effect.gen(function* () {
+    const consentScopes = [
+      "https://www.googleapis.com/auth/photoslibrary.appendonly",
+      "https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata",
+      "https://www.googleapis.com/auth/photospicker.mediaitems.readonly",
+    ];
+    const result = yield* convertGoogleDiscoveryBundleToOpenApi({
+      consentScopes,
+      documents: [
+        {
+          discoveryUrl: "https://www.googleapis.com/discovery/v1/apis/photoslibrary/v1/rest",
+          // @effect-diagnostics-next-line preferSchemaOverJson:off
+          documentText: JSON.stringify({
+            name: "photoslibrary",
+            version: "v1",
+            title: "Google Photos",
+            rootUrl: "https://photoslibrary.googleapis.com/",
+            servicePath: "v1/",
+            auth: {
+              oauth2: {
+                scopes: {
+                  "https://www.googleapis.com/auth/photoslibrary": {
+                    description: "Manage the full Google Photos library",
+                  },
+                  "https://www.googleapis.com/auth/photoslibrary.appendonly": {
+                    description: "Upload to Google Photos",
+                  },
+                  "https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata": {
+                    description: "Read app-created Google Photos media",
+                  },
+                },
+              },
+            },
+            methods: {
+              broadOnly: {
+                id: "photoslibrary.mediaItems.broadOnly",
+                httpMethod: "GET",
+                path: "mediaItems",
+                scopes: ["https://www.googleapis.com/auth/photoslibrary"],
+              },
+            },
+            schemas: {},
+          }),
+        },
+        {
+          discoveryUrl: "https://photospicker.googleapis.com/$discovery/rest?version=v1",
+          // @effect-diagnostics-next-line preferSchemaOverJson:off
+          documentText: JSON.stringify({
+            name: "photospicker",
+            version: "v1",
+            title: "Google Photos selected media",
+            rootUrl: "https://photospicker.googleapis.com/",
+            servicePath: "v1/",
+            auth: {
+              oauth2: {
+                scopes: {
+                  "https://www.googleapis.com/auth/photospicker.mediaitems.readonly": {
+                    description: "Read picker-selected media",
+                  },
+                },
+              },
+            },
+            methods: {
+              listPicked: {
+                id: "photospicker.mediaItems.list",
+                httpMethod: "GET",
+                path: "mediaItems",
+                scopes: ["https://www.googleapis.com/auth/photospicker.mediaitems.readonly"],
+              },
+            },
+            schemas: {},
+          }),
+        },
+      ],
+    });
+
+    const oauthTemplate = result.authenticationTemplate?.find((entry) => entry.kind === "oauth2");
+    expect(oauthTemplate?.kind === "oauth2" ? oauthTemplate.scopes : undefined).toEqual(
+      consentScopes,
+    );
+
+    // @effect-diagnostics-next-line preferSchemaOverJson:off
+    const spec = JSON.parse(result.specText) as {
+      paths: Record<
+        string,
+        Record<
+          string,
+          {
+            operationId: string;
+            servers?: readonly { readonly url: string }[];
+            parameters?: readonly {
+              name: string;
+              in: string;
+              required: boolean;
+              schema?: { default?: unknown; enum?: readonly unknown[] };
+            }[];
+            requestBody?: {
+              required?: boolean;
+              content?: Record<string, { schema?: { type?: string; format?: string } }>;
+            };
+            responses?: {
+              "200"?: {
+                content?: Record<string, { schema?: { type?: string } }>;
+              };
+            };
+          }
+        >
+      >;
+      components: {
+        securitySchemes: {
+          googleOAuth2: { flows: { authorizationCode: { scopes: Record<string, string> } } };
+        };
+      };
+    };
+    const operationIds = Object.values(spec.paths).flatMap((path) =>
+      Object.values(path).map((operation) => operation.operationId),
+    );
+    expect(operationIds).toContain("photoslibrary.mediaItems.upload");
+    expect(operationIds).toContain("photospicker.mediaItems.list");
+    expect(operationIds).not.toContain("photoslibrary.mediaItems.broadOnly");
+    const upload = spec.paths["/uploads"]?.post;
+    expect(upload?.operationId).toBe("photoslibrary.mediaItems.upload");
+    expect(upload?.servers).toEqual([{ url: "https://photoslibrary.googleapis.com/v1/" }]);
+    expect(upload?.parameters?.find((p) => p.name === "X-Goog-Upload-File-Name")).toMatchObject({
+      in: "header",
+      required: true,
+    });
+    expect(upload?.parameters?.find((p) => p.name === "X-Goog-Upload-Protocol")).toMatchObject({
+      in: "header",
+      required: true,
+      schema: { enum: ["raw"], default: "raw" },
+    });
+    expect(upload?.requestBody?.required).toBe(true);
+    expect(upload?.requestBody?.content?.["application/octet-stream"]?.schema).toMatchObject({
+      type: "string",
+      format: "binary",
+    });
+    expect(upload?.responses?.["200"]?.content?.["text/plain"]?.schema).toMatchObject({
+      type: "string",
+    });
+    expect(
+      Object.keys(spec.components.securitySchemes.googleOAuth2.flows.authorizationCode.scopes),
+    ).toEqual(consentScopes);
+  }),
+);

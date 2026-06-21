@@ -27,6 +27,8 @@ import { googleAudienceWarningsForUrls } from "../sdk/google-presets";
 import type { Authentication } from "../sdk/types";
 
 const GOOGLE_AUDIENCE_WARNING: Readonly<Record<string, string>> = {
+  "limited-user":
+    "Arbitrary pre-existing or shared albums usually cannot be managed unless Google exposes them to this app and OAuth scope.",
   "workspace-admin":
     "This connection includes Google Workspace admin APIs (Chat, Admin Directory, Admin Reports). Connecting requires a Workspace admin account — personal Gmail accounts cannot grant these scopes.",
   "unsupported-user":

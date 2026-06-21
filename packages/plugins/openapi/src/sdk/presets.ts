@@ -1,4 +1,8 @@
-import { googleOpenApiBundlePreset, googleOpenApiPresets } from "./google-presets";
+import {
+  googleOpenApiBundlePreset,
+  googleOpenApiPresets,
+  googlePhotosOpenApiBundlePreset,
+} from "./google-presets";
 
 export interface OpenApiPreset {
   readonly id: string;
@@ -144,6 +148,7 @@ export { googleOpenApiPresets, googleStandardUserOAuthPresets } from "./google-p
 
 export const openApiPresets: readonly OpenApiPreset[] = [
   googleOpenApiBundlePreset,
+  googlePhotosOpenApiBundlePreset,
   ...openApiOnlyPresets,
   ...googleOpenApiPresets,
 ];

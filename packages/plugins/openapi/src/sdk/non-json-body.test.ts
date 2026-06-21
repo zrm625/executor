@@ -234,6 +234,27 @@ describe("OpenAPI non-JSON request body dispatch", () => {
     }),
   );
 
+  it.effect("application/octet-stream: dense byte record passes through as bytes", () =>
+    Effect.gen(function* () {
+      const { server, captured } = yield* startEchoServer({
+        payload: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array()),
+      });
+
+      const executor = yield* createExecutor(makeTestConfig({ plugins: testPlugins() }));
+
+      const conn = yield* addOpenApiTestConnection(executor, server, { slug: "binrec" });
+
+      const payload = [0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46];
+      yield* executor.execute(conn.address("body.submit"), {
+        body: Object.fromEntries(payload.map((byte, index) => [String(index), byte])),
+      });
+
+      expect(captured.contentType).toBe("application/octet-stream");
+      expect(captured.body.length).toBe(payload.length);
+      expect(Array.from(captured.body)).toEqual(payload);
+    }),
+  );
+
   // -------------------------------------------------------------------------
   // Multi-content: spec declares both multipart and JSON for one operation.
   // Default is first-declared (spec author's preferred order, not JSON-first),
