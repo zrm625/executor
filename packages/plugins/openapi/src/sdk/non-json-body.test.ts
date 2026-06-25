@@ -259,6 +259,44 @@ describe("OpenAPI non-JSON request body dispatch", () => {
     }),
   );
 
+  it.effect("application/octet-stream: dense byte records pass through as bytes", () =>
+    Effect.gen(function* () {
+      const { server, captured } = yield* startEchoServer({
+        payload: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array()),
+      });
+
+      const executor = yield* createExecutor(makeTestConfig({ plugins: testPlugins() }));
+
+      const conn = yield* addOpenApiTestConnection(executor, server, { slug: "bin_record" });
+
+      yield* executor.execute(conn.address("body.submit"), {
+        body: { 0: 0xde, 1: 0xad, 2: 0xbe, 3: 0xef },
+      });
+
+      expect(captured.contentType).toBe("application/octet-stream");
+      expect(Array.from(captured.body)).toEqual([0xde, 0xad, 0xbe, 0xef]);
+    }),
+  );
+
+  it.effect("application/octet-stream: bodyBase64 passes through as bytes", () =>
+    Effect.gen(function* () {
+      const { server, captured } = yield* startEchoServer({
+        payload: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array()),
+      });
+
+      const executor = yield* createExecutor(makeTestConfig({ plugins: testPlugins() }));
+
+      const conn = yield* addOpenApiTestConnection(executor, server, { slug: "bin_b64" });
+
+      yield* executor.execute(conn.address("body.submit"), {
+        bodyBase64: "3q2+7wABAg==",
+      });
+
+      expect(captured.contentType).toBe("application/octet-stream");
+      expect(Array.from(captured.body)).toEqual([0xde, 0xad, 0xbe, 0xef, 0x00, 0x01, 0x02]);
+    }),
+  );
+
   it.effect(
     "format: byte response: Gmail-style image attachment data is exposed as a file artifact",
     () =>
@@ -703,6 +741,59 @@ describe("OpenAPI non-JSON request body dispatch", () => {
     }),
   );
 
+  it.effect("application/octet-stream: bodyBase64 passes through as bytes", () =>
+    Effect.gen(function* () {
+      const { server, captured } = yield* startEchoServer({
+        payload: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array()),
+      });
+
+      const executor = yield* createExecutor(makeTestConfig({ plugins: testPlugins() }));
+
+      const conn = yield* addOpenApiTestConnection(executor, server, { slug: "binb64" });
+
+      const payload = [0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x10, 0x80];
+      yield* executor.execute(conn.address("body.submit"), {
+        bodyBase64: Buffer.from(payload).toString("base64"),
+      });
+
+      expect(captured.contentType).toBe("application/octet-stream");
+      expect(captured.body.length).toBe(payload.length);
+      expect(Array.from(captured.body)).toEqual(payload);
+    }),
+  );
+
+  it.effect("application/octet-stream: input schema exposes bodyBase64 alternative", () =>
+    Effect.gen(function* () {
+      const { server } = yield* startEchoServer({
+        payload: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array()),
+      });
+
+      const executor = yield* createExecutor(makeTestConfig({ plugins: testPlugins() }));
+
+      const conn = yield* addOpenApiTestConnection(executor, server, {
+        slug: "binb64schema",
+        baseUrl: "https://example.com",
+      });
+
+      const view = yield* executor.tools.schema(conn.address("body.submit"));
+      expect(view).not.toBeNull();
+      const schema = view!.inputSchema as {
+        required?: string[];
+        properties?: {
+          bodyBase64?: {
+            type?: string;
+            contentEncoding?: string;
+          };
+        };
+      };
+      expect(schema.properties?.bodyBase64).toMatchObject({
+        type: "string",
+        contentEncoding: "base64",
+      });
+      expect(schema.required ?? []).not.toContain("body");
+    }),
+  );
+
   // -------------------------------------------------------------------------
   // Multi-content: spec declares both multipart and JSON for one operation.
   // Default is first-declared (spec author's preferred order, not JSON-first),
@@ -754,6 +845,33 @@ describe("OpenAPI non-JSON request body dispatch", () => {
     }),
   );
 
+  it.effect("multi-content: bodyBase64 selects octet-stream without explicit contentType", () =>
+    Effect.gen(function* () {
+      const { server, captured } = yield* startEchoServer({
+        payload: multiContentPayload,
+        transformSpec: replaceRequestBodyContent("/submit", "post", {
+          "application/json": {
+            schema: { type: "object" },
+          },
+          "application/octet-stream": {
+            schema: { type: "string", format: "binary" },
+          },
+        }),
+      });
+
+      const executor = yield* createExecutor(makeTestConfig({ plugins: testPlugins() }));
+
+      const conn = yield* addOpenApiTestConnection(executor, server, { slug: "mc_b64" });
+
+      yield* executor.execute(conn.address("body.submit"), {
+        bodyBase64: "3q2+7w==",
+      });
+
+      expect(captured.contentType).toBe("application/octet-stream");
+      expect(Array.from(captured.body)).toEqual([0xde, 0xad, 0xbe, 0xef]);
+    }),
+  );
+
   it.effect("multi-content: tool input schema exposes contentType enum", () =>
     Effect.gen(function* () {
       const { server } = yield* startEchoServer({
@@ -780,6 +898,26 @@ describe("OpenAPI non-JSON request body dispatch", () => {
         "application/json",
       ]);
       expect(schema.properties?.contentType?.default).toBe("multipart/form-data");
+    }),
+  );
+
+  it.effect("octet-stream: tool input schema exposes bodyBase64", () =>
+    Effect.gen(function* () {
+      const { server } = yield* startEchoServer({
+        payload: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array()),
+      });
+      const executor = yield* createExecutor(makeTestConfig({ plugins: testPlugins() }));
+
+      const conn = yield* addOpenApiTestConnection(executor, server, { slug: "bin_schema" });
+
+      const view = yield* executor.tools.schema(conn.address("body.submit"));
+      expect(view).not.toBeNull();
+      const schema = view!.inputSchema as {
+        properties?: {
+          bodyBase64?: { contentEncoding?: string };
+        };
+      };
+      expect(schema.properties?.bodyBase64?.contentEncoding).toBe("base64");
     }),
   );
 

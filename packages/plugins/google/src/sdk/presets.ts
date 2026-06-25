@@ -12,6 +12,7 @@ export interface GooglePreset {
 export type GoogleOpenApiOAuthAudience =
   | "standard-user"
   | "advanced-user"
+  | "limited-user"
   | "workspace-admin"
   | "unsupported-user";
 
@@ -24,12 +25,23 @@ const gd = (service: string, version: string) =>
 
 const GOOGLE_G = "https://fonts.gstatic.com/s/i/productlogos/googleg/v6/192px.svg";
 export const GOOGLE_BUNDLE_PRESET_ID = "google";
+export const GOOGLE_PHOTOS_PRESET_ID = "google-photos";
+export const GOOGLE_PHOTOS_ICON =
+  "https://www.gstatic.com/images/branding/product/2x/photos_96dp.png";
 
 export const googleOpenApiBundlePreset: GooglePreset = {
   id: GOOGLE_BUNDLE_PRESET_ID,
   name: "Google",
   summary: "Bundle Gmail, Calendar, Drive, Docs, and other Google APIs into one source.",
   icon: GOOGLE_G,
+  featured: true,
+};
+
+export const googlePhotosOpenApiBundlePreset: GooglePreset = {
+  id: GOOGLE_PHOTOS_PRESET_ID,
+  name: "Google Photos",
+  summary: "Albums, uploads, app-created media, and user-selected picker media.",
+  icon: GOOGLE_PHOTOS_ICON,
   featured: true,
 };
 
@@ -193,6 +205,29 @@ export const googleOpenApiPresets: readonly GoogleOpenApiPreset[] = [
   },
 ];
 
+export const googlePhotosOpenApiPresets: readonly GoogleOpenApiPreset[] = [
+  {
+    id: "google-photos-library",
+    name: "Google Photos Library",
+    summary: "Albums, uploads, and app-created media through Google Photos.",
+    url: gd("photoslibrary", "v1"),
+    icon: GOOGLE_PHOTOS_ICON,
+    oauthAudience: "limited-user",
+  },
+  {
+    id: "google-photos-picker",
+    name: "Google Photos Picker",
+    summary: "Picker sessions and user-selected Google Photos media items.",
+    url: "https://photospicker.googleapis.com/$discovery/rest?version=v1",
+    icon: GOOGLE_PHOTOS_ICON,
+    oauthAudience: "limited-user",
+  },
+];
+
+export const googlePhotosPresetIds: readonly string[] = googlePhotosOpenApiPresets.map(
+  (preset) => preset.id,
+);
+
 export const googleStandardUserOAuthPresets = googleOpenApiPresets.filter(
   (preset) => preset.oauthAudience === "standard-user",
 );
@@ -221,6 +256,11 @@ export const googleOAuthConsentScopes: Readonly<Record<string, readonly string[]
   "google-forms": ["https://www.googleapis.com/auth/forms.body"],
   "google-tasks": ["https://www.googleapis.com/auth/tasks"],
   "google-people": ["https://www.googleapis.com/auth/contacts"],
+  "google-photos-library": [
+    "https://www.googleapis.com/auth/photoslibrary.appendonly",
+    "https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata",
+  ],
+  "google-photos-picker": ["https://www.googleapis.com/auth/photospicker.mediaitems.readonly"],
   "google-chat": ["https://www.googleapis.com/auth/chat.spaces"],
   "google-keep": ["https://www.googleapis.com/auth/keep"],
   "google-youtube-data": ["https://www.googleapis.com/auth/youtube"],
@@ -255,7 +295,7 @@ const normalizeGooglePresetUrl = (url: string): string => {
 };
 
 const googlePresetsByNormalizedUrl: ReadonlyMap<string, GoogleOpenApiPreset> = new Map(
-  googleOpenApiPresets.flatMap((preset) =>
+  [...googleOpenApiPresets, ...googlePhotosOpenApiPresets].flatMap((preset) =>
     preset.url ? [[normalizeGooglePresetUrl(preset.url), preset] as const] : [],
   ),
 );
@@ -272,7 +312,13 @@ export const googleAudienceWarningsForUrls = (
   const seen = new Set<GoogleOpenApiOAuthAudience>();
   for (const url of urls) {
     const audience = googlePresetForDiscoveryUrl(url)?.oauthAudience;
-    if (audience === "workspace-admin" || audience === "unsupported-user") seen.add(audience);
+    if (
+      audience === "limited-user" ||
+      audience === "workspace-admin" ||
+      audience === "unsupported-user"
+    ) {
+      seen.add(audience);
+    }
   }
   return [...seen];
 };

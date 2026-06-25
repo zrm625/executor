@@ -96,3 +96,35 @@ it("splits advanced Google OAuth into smaller known-good consent batches", () =>
     },
   ]);
 });
+
+it("groups Google Photos library and picker scopes behind one visible consent batch", () => {
+  expect(
+    googleOAuthConsentBatches([
+      {
+        id: "google-photos-library",
+        name: "Albums and uploads",
+        oauthAudience: "limited-user",
+        scopes: [
+          "https://www.googleapis.com/auth/photoslibrary.appendonly",
+          "https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata",
+        ],
+      },
+      {
+        id: "google-photos-picker",
+        name: "Selected media",
+        oauthAudience: "limited-user",
+        scopes: ["https://www.googleapis.com/auth/photospicker.mediaitems.readonly"],
+      },
+    ]),
+  ).toEqual([
+    {
+      id: "google-photos",
+      label: "Google Photos",
+      apiScopes: [
+        "https://www.googleapis.com/auth/photoslibrary.appendonly",
+        "https://www.googleapis.com/auth/photoslibrary.readonly.appcreateddata",
+        "https://www.googleapis.com/auth/photospicker.mediaitems.readonly",
+      ],
+    },
+  ]);
+});

@@ -15,8 +15,10 @@ import { Input } from "@executor-js/react/components/input";
 import { IntegrationFavicon } from "@executor-js/react/components/integration-favicon";
 
 import {
+  GOOGLE_PHOTOS_ICON,
   googleOAuthConsentScopesForPreset,
   googleOpenApiPresets,
+  googlePhotosPresetIds,
   type GoogleOpenApiOAuthAudience,
   type GoogleOpenApiPreset,
 } from "../sdk/presets";
@@ -26,9 +28,9 @@ import { isGoogleDiscoveryUrl } from "../sdk/discovery";
 // ---------------------------------------------------------------------------
 // GoogleProductPicker - the "customize your Google connection" surface.
 //
-// A checkable card grid over `googleOpenApiPresets`, grouped/annotated by
-// `oauthAudience`. The user picks which Google APIs to bundle into the single
-// `google` integration; the parent turns the selected discovery URLs into a
+// A checkable card grid over Google Discovery presets, grouped/annotated by
+// `oauthAudience`. The user picks which APIs to bundle into a single integration;
+// the parent turns the selected discovery URLs into a
 // `{ kind: "googleDiscoveryBundle", urls }` add. A "View scopes" panel previews
 // the unioned OAuth consent (via `googleOAuthConsentBatches`) BEFORE connecting,
 // and a custom-URL escape hatch lets advanced users paste any Google Discovery
@@ -36,11 +38,11 @@ import { isGoogleDiscoveryUrl } from "../sdk/discovery";
 // ---------------------------------------------------------------------------
 
 // Audience groups, ordered from least- to most-privileged. The warning tiers
-// (`workspace-admin`, `unsupported-user`) carry a caution chip so the user sees
-// the consent risk before selecting.
+// carry a caution chip so the user sees consent limits before selecting.
 const AUDIENCE_ORDER: readonly GoogleOpenApiOAuthAudience[] = [
   "standard-user",
   "advanced-user",
+  "limited-user",
   "workspace-admin",
   "unsupported-user",
 ];
@@ -48,26 +50,33 @@ const AUDIENCE_ORDER: readonly GoogleOpenApiOAuthAudience[] = [
 const AUDIENCE_LABEL: Readonly<Record<GoogleOpenApiOAuthAudience, string>> = {
   "standard-user": "Core Google services",
   "advanced-user": "Advanced services",
+  "limited-user": "Limited services",
   "workspace-admin": "Workspace admin",
-  "unsupported-user": "Limited user consent",
+  "unsupported-user": "Unsupported consent",
 };
 
 const AUDIENCE_DESCRIPTION: Readonly<Record<GoogleOpenApiOAuthAudience, string>> = {
   "standard-user": "Connect with a normal Google account - one consent screen.",
   "advanced-user": "Broader scopes that may need an unverified-app warning to be accepted.",
+  "limited-user": "Available through OAuth, with product-specific API limitations.",
   "workspace-admin": "Requires a Google Workspace admin account; not available on personal Gmail.",
-  "unsupported-user": "Google does not grant these scopes through standard user OAuth consent.",
+  "unsupported-user": "Google may not grant these scopes through standard user OAuth consent.",
 };
 
 const audienceNeedsWarning = (audience: GoogleOpenApiOAuthAudience): boolean =>
-  audience === "workspace-admin" || audience === "unsupported-user";
+  audience === "limited-user" || audience === "workspace-admin" || audience === "unsupported-user";
 
 type GoogleProductPickerProps = {
+  readonly presets?: readonly GoogleOpenApiPreset[];
   readonly selectedPresetIds: ReadonlySet<string>;
   readonly onToggle: (presetId: string, checked: boolean) => void;
   readonly customUrls: readonly string[];
   readonly onAddCustomUrl: (url: string) => void;
   readonly onRemoveCustomUrl: (url: string) => void;
+  readonly visiblePresetIds?: ReadonlySet<string>;
+  readonly title?: string;
+  readonly description?: string;
+  readonly hideCustomUrls?: boolean;
 };
 
 const AudienceWarningChip = ({ audience }: { audience: GoogleOpenApiOAuthAudience }) =>
@@ -79,10 +88,15 @@ const AudienceWarningChip = ({ audience }: { audience: GoogleOpenApiOAuthAudienc
       <TriangleAlert className="size-3" />
       Admin only
     </Badge>
+  ) : audience === "limited-user" ? (
+    <Badge variant="outline" className="shrink-0 border-amber-500/40 text-amber-700">
+      <TriangleAlert className="size-3" />
+      Limited
+    </Badge>
   ) : audience === "unsupported-user" ? (
     <Badge variant="outline" className="shrink-0 border-destructive/40 text-destructive">
       <TriangleAlert className="size-3" />
-      Limited consent
+      Unsupported
     </Badge>
   ) : null;
 
@@ -91,11 +105,17 @@ const AudienceWarningChip = ({ audience }: { audience: GoogleOpenApiOAuthAudienc
 // Name + truncated summary share one baseline for a dense, scannable two-column
 // list; the audience warning chip trails on the right.
 const ProductRow = ({
-  preset,
+  icon,
+  name,
+  summary,
+  url,
   checked,
   onToggle,
 }: {
-  readonly preset: GoogleOpenApiPreset;
+  readonly icon?: string;
+  readonly name: string;
+  readonly summary: string;
+  readonly url?: string;
   readonly checked: boolean;
   readonly onToggle: (checked: boolean) => void;
 }) => (
@@ -110,15 +130,14 @@ const ProductRow = ({
   >
     <Checkbox checked={checked} onCheckedChange={(next) => onToggle(next === true)} />
     <div className="shrink-0">
-      <IntegrationFavicon icon={preset.icon} url={preset.url} size={16} />
+      <IntegrationFavicon icon={icon} url={url} size={16} />
     </div>
     {/* One truncating line - the name + summary clip to the cell with an
         ellipsis instead of overflowing into the neighbouring column. */}
     <div className="min-w-0 flex-1 truncate text-sm">
-      <span className="font-medium text-foreground">{preset.name}</span>{" "}
-      <span className="text-[11px] text-muted-foreground">{preset.summary}</span>
+      <span className="font-medium text-foreground">{name}</span>{" "}
+      <span className="text-[11px] text-muted-foreground">{summary}</span>
     </div>
-    <AudienceWarningChip audience={preset.oauthAudience} />
   </FieldLabel>
 );
 
@@ -203,23 +222,32 @@ const CustomUrlEscapeHatch = ({
 };
 
 export function GoogleProductPicker({
+  presets = googleOpenApiPresets,
   selectedPresetIds,
   onToggle,
   customUrls,
   onAddCustomUrl,
   onRemoveCustomUrl,
+  visiblePresetIds,
+  title = "Customize your Google connection",
+  description = "Pick the Google APIs to bundle into one connection. They share a single OAuth consent and appear as merged tools under one Google integration.",
+  hideCustomUrls = false,
 }: GoogleProductPickerProps) {
   const [scopesOpen, setScopesOpen] = useState(false);
+  const showCombinedGooglePhotos =
+    visiblePresetIds === undefined || googlePhotosPresetIds.every((id) => visiblePresetIds.has(id));
 
   const groups = useMemo(
     () =>
       AUDIENCE_ORDER.flatMap((audience: GoogleOpenApiOAuthAudience) => {
-        const presets = googleOpenApiPresets.filter(
-          (preset: GoogleOpenApiPreset) => preset.oauthAudience === audience,
+        const audiencePresets = presets.filter(
+          (preset: GoogleOpenApiPreset) =>
+            preset.oauthAudience === audience &&
+            (visiblePresetIds === undefined || visiblePresetIds.has(preset.id)),
         );
-        return presets.length > 0 ? [{ audience, presets }] : [];
+        return audiencePresets.length > 0 ? [{ audience, presets: audiencePresets }] : [];
       }),
-    [],
+    [presets, visiblePresetIds],
   );
 
   // The "View scopes" preview unions the selected presets' representative
@@ -228,7 +256,7 @@ export function GoogleProductPicker({
   const consentBatches = useMemo(
     () =>
       googleOAuthConsentBatches(
-        googleOpenApiPresets
+        presets
           .filter((preset: GoogleOpenApiPreset) => selectedPresetIds.has(preset.id))
           .map((preset: GoogleOpenApiPreset) => ({
             id: preset.id,
@@ -237,7 +265,7 @@ export function GoogleProductPicker({
             scopes: googleOAuthConsentScopesForPreset(preset.id),
           })),
       ),
-    [selectedPresetIds],
+    [presets, selectedPresetIds],
   );
 
   const selectedCount = selectedPresetIds.size + customUrls.length;
@@ -245,11 +273,8 @@ export function GoogleProductPicker({
   return (
     <section className="space-y-4">
       <div className="space-y-1">
-        <FieldLabel>Customize your Google connection</FieldLabel>
-        <p className="text-[11px] text-muted-foreground">
-          Pick the Google APIs to bundle into one connection. They share a single OAuth consent and
-          appear as merged tools under one Google integration.
-        </p>
+        <FieldLabel>{title}</FieldLabel>
+        <p className="text-[11px] text-muted-foreground">{description}</p>
       </div>
 
       {groups.map(
@@ -287,24 +312,55 @@ export function GoogleProductPicker({
             </div>
             <p className="text-[11px] text-muted-foreground">{AUDIENCE_DESCRIPTION[audience]}</p>
             <div className="grid grid-cols-1 gap-x-4 gap-y-0.5 sm:grid-cols-2">
-              {presets.map((preset: GoogleOpenApiPreset) => (
-                <ProductRow
-                  key={preset.id}
-                  preset={preset}
-                  checked={selectedPresetIds.has(preset.id)}
-                  onToggle={(checked: boolean) => onToggle(preset.id, checked)}
-                />
-              ))}
+              {presets.map((preset: GoogleOpenApiPreset) =>
+                showCombinedGooglePhotos && preset.id === googlePhotosPresetIds[1] ? null : (
+                  <div key={preset.id} className="flex min-w-0 items-center gap-2">
+                    <ProductRow
+                      icon={
+                        showCombinedGooglePhotos && preset.id === googlePhotosPresetIds[0]
+                          ? GOOGLE_PHOTOS_ICON
+                          : preset.icon
+                      }
+                      name={
+                        showCombinedGooglePhotos && preset.id === googlePhotosPresetIds[0]
+                          ? "Google Photos"
+                          : preset.name
+                      }
+                      summary={
+                        showCombinedGooglePhotos && preset.id === googlePhotosPresetIds[0]
+                          ? "Uploads, app-created albums, and selected existing media."
+                          : preset.summary
+                      }
+                      url={preset.url}
+                      checked={
+                        showCombinedGooglePhotos && preset.id === googlePhotosPresetIds[0]
+                          ? googlePhotosPresetIds.every((id) => selectedPresetIds.has(id))
+                          : selectedPresetIds.has(preset.id)
+                      }
+                      onToggle={(checked: boolean) => {
+                        if (showCombinedGooglePhotos && preset.id === googlePhotosPresetIds[0]) {
+                          googlePhotosPresetIds.forEach((id) => onToggle(id, checked));
+                        } else {
+                          onToggle(preset.id, checked);
+                        }
+                      }}
+                    />
+                    <AudienceWarningChip audience={preset.oauthAudience} />
+                  </div>
+                ),
+              )}
             </div>
           </div>
         ),
       )}
 
-      <CustomUrlEscapeHatch
-        customUrls={customUrls}
-        onAddCustomUrl={onAddCustomUrl}
-        onRemoveCustomUrl={onRemoveCustomUrl}
-      />
+      {!hideCustomUrls && (
+        <CustomUrlEscapeHatch
+          customUrls={customUrls}
+          onAddCustomUrl={onAddCustomUrl}
+          onRemoveCustomUrl={onRemoveCustomUrl}
+        />
+      )}
 
       <div className="space-y-1.5 rounded-lg border border-border bg-muted/10 px-3 py-2.5">
         <div className="flex items-center gap-2">

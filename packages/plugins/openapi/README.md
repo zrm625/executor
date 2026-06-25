@@ -33,6 +33,20 @@ const tools = await executor.tools.list();
 const result = await executor.tools.invoke("petstore.listPets", {});
 ```
 
+## Binary request bodies
+
+For `application/octet-stream` request bodies, pass raw bytes with `body` as a `Uint8Array`,
+`ArrayBuffer`, byte array, or dense byte record. You can also pass base64 data with `bodyBase64`:
+
+```ts
+await executor.tools.invoke("files.upload", {
+  bodyBase64: "3q2+7w==",
+});
+```
+
+When a request body declares multiple media types and includes `application/octet-stream`,
+`bodyBase64` selects the octet-stream media type automatically unless `contentType` is provided.
+
 ## Secret-backed auth headers
 
 Wire API keys or bearer tokens through the executor's secret store — never hard-code them in source configs:

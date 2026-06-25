@@ -20,21 +20,30 @@ import { OpenApiSourceDetailsFields } from "@executor-js/plugin-openapi/react";
 
 import { addGoogleBundle } from "./atoms";
 import { GoogleProductPicker } from "./GoogleProductPicker";
-import { googleOpenApiPresets, type GoogleOpenApiPreset } from "../sdk/presets";
+import {
+  GOOGLE_PHOTOS_ICON,
+  GOOGLE_PHOTOS_PRESET_ID,
+  googleOpenApiPresets,
+  googlePhotosOpenApiPresets,
+  googlePhotosPresetIds,
+  type GoogleOpenApiPreset,
+} from "../sdk/presets";
 
 const GOOGLE_BUNDLE_FAVICON = "https://fonts.gstatic.com/s/i/productlogos/googleg/v6/192px.svg";
 
-const googleBundleDefaultPresetIds: ReadonlySet<string> = new Set(
-  googleOpenApiPresets
-    .filter((preset: GoogleOpenApiPreset) => preset.featured)
-    .map((preset: GoogleOpenApiPreset) => preset.id),
-);
+const defaultPresetIds = (presets: readonly GoogleOpenApiPreset[]): ReadonlySet<string> =>
+  new Set(
+    presets
+      .filter((preset: GoogleOpenApiPreset) => preset.featured)
+      .map((preset: GoogleOpenApiPreset) => preset.id),
+  );
 
 const googleBundleUrls = (
+  presets: readonly GoogleOpenApiPreset[],
   selectedPresetIds: ReadonlySet<string>,
   customUrls: readonly string[],
 ): readonly string[] => {
-  const fromPresets = googleOpenApiPresets.flatMap((preset: GoogleOpenApiPreset) =>
+  const fromPresets = presets.flatMap((preset: GoogleOpenApiPreset) =>
     preset.url && selectedPresetIds.has(preset.id) ? [preset.url] : [],
   );
   return [...new Set([...fromPresets, ...customUrls])];
@@ -43,10 +52,18 @@ const googleBundleUrls = (
 export default function AddGoogleSource(props: {
   onComplete: (slug?: string) => void;
   onCancel: () => void;
+  initialPreset?: string;
   initialNamespace?: string;
 }) {
+  const isGooglePhotosPreset = props.initialPreset === GOOGLE_PHOTOS_PRESET_ID;
+  const presetCatalog = isGooglePhotosPreset ? googlePhotosOpenApiPresets : googleOpenApiPresets;
+  const fallbackName = isGooglePhotosPreset ? "Google Photos" : "Google";
+  const fallbackNamespace = isGooglePhotosPreset ? "google_photos" : "google";
+  const fallbackDescription = isGooglePhotosPreset
+    ? "Google Photos albums, uploads, app-created media, and selected picker media."
+    : "Google APIs";
   const [selectedPresetIds, setSelectedPresetIds] = useState<ReadonlySet<string>>(
-    googleBundleDefaultPresetIds,
+    isGooglePhotosPreset ? new Set(googlePhotosPresetIds) : defaultPresetIds(presetCatalog),
   );
   const [customDiscoveryUrls, setCustomDiscoveryUrls] = useState<readonly string[]>([]);
   const [baseUrl, setBaseUrl] = useState("");
@@ -55,13 +72,13 @@ export default function AddGoogleSource(props: {
   const [addError, setAddError] = useState<string | null>(null);
 
   const identity = useIntegrationIdentity({
-    fallbackName: "Google",
-    fallbackNamespace: props.initialNamespace ?? "google",
+    fallbackName,
+    fallbackNamespace: props.initialNamespace ?? fallbackNamespace,
   });
 
   const bundleDiscoveryUrls = useMemo(
-    () => googleBundleUrls(selectedPresetIds, customDiscoveryUrls),
-    [selectedPresetIds, customDiscoveryUrls],
+    () => googleBundleUrls(presetCatalog, selectedPresetIds, customDiscoveryUrls),
+    [presetCatalog, selectedPresetIds, customDiscoveryUrls],
   );
 
   const toggleBundlePreset = useCallback((presetId: string, checked: boolean) => {
@@ -87,9 +104,9 @@ export default function AddGoogleSource(props: {
 
   const doAdd = useAtomSet(addGoogleBundle, { mode: "promiseExit" });
 
-  const resolvedSourceId = slugifyNamespace(identity.namespace) || "google";
-  const resolvedDisplayName = identity.name.trim() || "Google";
-  const resolvedDescription = descriptionDraft ?? "Google APIs";
+  const resolvedSourceId = slugifyNamespace(identity.namespace) || fallbackNamespace;
+  const resolvedDisplayName = identity.name.trim() || fallbackName;
+  const resolvedDescription = descriptionDraft ?? fallbackDescription;
   const slugAlreadyExists = useSlugAlreadyExists(resolvedSourceId);
   const canAdd = bundleDiscoveryUrls.length > 0 && !slugAlreadyExists;
 
@@ -119,22 +136,35 @@ export default function AddGoogleSource(props: {
   return (
     <div className="flex flex-1 flex-col gap-6">
       <div>
-        <h1 className="text-xl font-semibold text-foreground">Add Google</h1>
+        <h1 className="text-xl font-semibold text-foreground">Add {fallbackName}</h1>
         <p className="mt-1 text-[13px] text-muted-foreground">
-          Bundle Google APIs into one integration with a shared OAuth consent.
+          {isGooglePhotosPreset
+            ? "Connect Google Photos APIs with one shared OAuth consent."
+            : "Bundle Google APIs into one integration with a shared OAuth consent."}
         </p>
       </div>
 
       <GoogleProductPicker
+        presets={presetCatalog}
         selectedPresetIds={selectedPresetIds}
         onToggle={toggleBundlePreset}
         customUrls={customDiscoveryUrls}
         onAddCustomUrl={addCustomDiscoveryUrl}
         onRemoveCustomUrl={removeCustomDiscoveryUrl}
+        visiblePresetIds={isGooglePhotosPreset ? new Set(googlePhotosPresetIds) : undefined}
+        title={
+          isGooglePhotosPreset ? "Google Photos capabilities" : "Customize your Google connection"
+        }
+        description={
+          isGooglePhotosPreset
+            ? "Albums and uploads are limited to app-created media. The picker API can read media the user explicitly selects."
+            : "Pick the Google APIs to bundle into one connection. They share a single OAuth consent and appear as merged tools under one Google integration."
+        }
+        hideCustomUrls={isGooglePhotosPreset}
       />
 
       <OpenApiSourceDetailsFields
-        title="Google"
+        title={fallbackName}
         subtitle={`${bundleDiscoveryUrls.length} Google API${
           bundleDiscoveryUrls.length !== 1 ? "s" : ""
         } · one shared OAuth consent`}
@@ -144,7 +174,7 @@ export default function AddGoogleSource(props: {
         baseUrl={baseUrl}
         onBaseUrlChange={setBaseUrl}
         baseUrlLabel="Base URL override (optional)"
-        faviconIcon={GOOGLE_BUNDLE_FAVICON}
+        faviconIcon={isGooglePhotosPreset ? GOOGLE_PHOTOS_ICON : GOOGLE_BUNDLE_FAVICON}
         faviconUrl={baseUrl}
       />
 
@@ -158,7 +188,7 @@ export default function AddGoogleSource(props: {
         </Button>
         <Button onClick={() => void handleAdd()} disabled={!canAdd || adding}>
           {adding && <Spinner className="size-3.5" />}
-          {adding ? "Adding…" : "Connect Google"}
+          {adding ? "Adding…" : `Connect ${fallbackName}`}
         </Button>
       </FloatActions>
     </div>

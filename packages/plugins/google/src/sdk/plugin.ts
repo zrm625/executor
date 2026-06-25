@@ -36,7 +36,12 @@ import {
   normalizeGoogleDiscoveryUrl,
 } from "./discovery";
 import { decodeGoogleIntegrationConfig, type GoogleIntegrationConfig } from "./config";
-import { googleOpenApiBundlePreset } from "./presets";
+import {
+  googleOAuthConsentScopesForPreset,
+  googleOpenApiBundlePreset,
+  googlePhotosOpenApiPresets,
+  googlePhotosPresetIds,
+} from "./presets";
 
 export interface GoogleBundleConfig {
   readonly urls: readonly string[];
@@ -68,6 +73,34 @@ export interface GooglePluginOptions {
 
 const DEFAULT_GOOGLE_SLUG = "google";
 
+const normalizeGoogleDiscoveryPresetUrl = (url: string): string => {
+  const discoveryUrl = normalizeGoogleDiscoveryUrl(url);
+  if (discoveryUrl) return discoveryUrl;
+  const trimmed = url.trim();
+  if (!URL.canParse(trimmed)) return trimmed.replace(/\/$/, "");
+  const parsed = new URL(trimmed);
+  parsed.hash = "";
+  parsed.searchParams.sort();
+  return parsed.toString().replace(/\/$/, "");
+};
+
+const googlePhotosBundleUrls = new Set(
+  googlePhotosOpenApiPresets.flatMap((preset) =>
+    preset.url ? [normalizeGoogleDiscoveryPresetUrl(preset.url)] : [],
+  ),
+);
+
+const googlePhotosBundleConsentScopes = (
+  urls: readonly string[],
+): readonly string[] | undefined => {
+  const normalized = new Set(urls.map(normalizeGoogleDiscoveryPresetUrl));
+  if (normalized.size !== googlePhotosBundleUrls.size) return undefined;
+  for (const url of googlePhotosBundleUrls) {
+    if (!normalized.has(url)) return undefined;
+  }
+  return googlePhotosPresetIds.flatMap((presetId) => googleOAuthConsentScopesForPreset(presetId));
+};
+
 const fetchGoogleBundleConversion = (
   urls: readonly string[],
   httpClientLayer: Layer.Layer<HttpClient.HttpClient, never, never>,
@@ -80,7 +113,15 @@ const fetchGoogleBundleConversion = (
         Effect.map((documentText) => ({ discoveryUrl: url, documentText })),
       ),
     { concurrency: 4 },
-  ).pipe(Effect.flatMap((documents) => convertGoogleDiscoveryBundleToOpenApi({ documents })));
+  ).pipe(
+    Effect.flatMap((documents) => {
+      const consentScopes = googlePhotosBundleConsentScopes(urls);
+      return convertGoogleDiscoveryBundleToOpenApi({
+        documents,
+        ...(consentScopes ? { consentScopes } : {}),
+      });
+    }),
+  );
 
 const uniqueUrls = (urls: readonly string[]): readonly string[] => [
   ...new Set(urls.flatMap((url) => normalizeGoogleDiscoveryUrl(url) ?? [])),

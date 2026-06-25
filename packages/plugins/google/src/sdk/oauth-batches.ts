@@ -15,12 +15,14 @@ export type GoogleOAuthConsentBatch = {
 };
 
 const GOOGLE_CLOUD_BATCH_IDS = new Set(["google-bigquery", "google-cloud-resource-manager"]);
+const GOOGLE_PHOTOS_BATCH_IDS = new Set(["google-photos-library", "google-photos-picker"]);
 
 export const googleOAuthConsentBatches = (
   items: readonly GoogleOAuthBatchInput[],
 ): readonly GoogleOAuthConsentBatch[] => {
   const standardScopes: string[] = [];
   const cloudScopes: string[] = [];
+  const photosScopes: string[] = [];
   const batches: GoogleOAuthConsentBatch[] = [];
 
   for (const item of items) {
@@ -33,6 +35,10 @@ export const googleOAuthConsentBatches = (
       cloudScopes.push(...item.scopes);
       continue;
     }
+    if (GOOGLE_PHOTOS_BATCH_IDS.has(item.id)) {
+      photosScopes.push(...item.scopes);
+      continue;
+    }
     batches.push({
       id: item.id,
       label: item.name,
@@ -42,6 +48,7 @@ export const googleOAuthConsentBatches = (
 
   const compactedStandardScopes = compactGoogleOAuthScopes(standardScopes);
   const compactedCloudScopes = compactGoogleOAuthScopes(cloudScopes);
+  const compactedPhotosScopes = compactGoogleOAuthScopes(photosScopes);
   return [
     ...(compactedStandardScopes.length > 0
       ? [
@@ -49,6 +56,15 @@ export const googleOAuthConsentBatches = (
             id: "google-core",
             label: "Core Google services",
             apiScopes: compactedStandardScopes,
+          },
+        ]
+      : []),
+    ...(compactedPhotosScopes.length > 0
+      ? [
+          {
+            id: "google-photos",
+            label: "Google Photos",
+            apiScopes: compactedPhotosScopes,
           },
         ]
       : []),

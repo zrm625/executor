@@ -173,6 +173,32 @@ it.effect("targets the server chosen by the call's `server.url`", () =>
   ),
 );
 
+it.effect("composes an operation server base path with the operation path exactly once", () =>
+  Effect.promise(() =>
+    withServer(async ({ baseUrl, requests }) => {
+      const operation = OperationBinding.make({
+        method: "post",
+        servers: [
+          ServerInfo.make({
+            url: `${baseUrl}/v1/`,
+            description: Option.none(),
+            variables: Option.none(),
+          }),
+        ],
+        pathTemplate: "/uploads",
+        requestBody: Option.none(),
+        responseBody: Option.none(),
+        parameters: [],
+      });
+
+      await Effect.runPromise(invokeWithLayer(operation, {}, "", {}, {}, FetchHttpClient.layer));
+
+      const url = new URL(requests[0]!, "http://executor.test");
+      expect(url.pathname).toBe("/v1/uploads");
+    }),
+  ),
+);
+
 it.effect("a connection base URL overrides the operation's servers", () =>
   Effect.promise(() =>
     withServer(async ({ baseUrl, requests }) => {
