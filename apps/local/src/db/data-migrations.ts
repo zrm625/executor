@@ -20,7 +20,10 @@ import {
 import { graphqlIntrospectionBlobDataMigration } from "@executor-js/plugin-graphql";
 import { googleOpenApiOwnershipDataMigration } from "@executor-js/plugin-openapi/providers/google";
 
-import { providerServiceSplitDataMigration } from "@executor-js/plugin-provider-service-split";
+import {
+  providerServiceCatalogRepairDataMigration,
+  providerServiceSplitDataMigration,
+} from "@executor-js/plugin-provider-service-split";
 import { authConfigTransforms } from "./auth-config-migration";
 import { LOCAL_V1_V2_LEDGER_NAME } from "./v1-v2-migration";
 
@@ -45,6 +48,7 @@ export const localDataMigrations: readonly SqliteDataMigration[] = [
   graphqlIntrospectionBlobDataMigration,
   googleOpenApiOwnershipDataMigration,
   providerServiceSplitDataMigration,
+  providerServiceCatalogRepairDataMigration,
   // GC dead DCR oauth_client rows (old always-register duplicates) and backfill
   // the surviving DCR rows' origin_issuer from token_url (issue #1120, Part C).
   oauthClientGcSqliteMigration,

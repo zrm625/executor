@@ -1301,6 +1301,65 @@ paths:
     ),
   );
 
+  it.effect("repairs a migrated provider connection whose operation catalog is missing", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const specServer = yield* serveMutableOpenApiSpecTestServer({ initialApi: TestApi });
+        const config = makeTestConfig({ plugins: testPlugins() });
+        const executor = yield* createExecutor(config);
+        const integration = IntegrationSlug.make("google_gmail");
+
+        yield* executor.openapi.addSpec({
+          spec: { kind: "url", url: specServer.specUrl },
+          slug: integration,
+          family: "google",
+          baseUrl: specServer.baseUrl,
+          authenticationTemplate: [apiKeyTemplate],
+        });
+        yield* executor.connections.create({
+          owner: "org",
+          name: ConnectionName.make("main"),
+          integration,
+          template: AuthTemplateSlug.make("apiKey"),
+          value: "secret-key-123",
+        });
+        expect((yield* executor.tools.list({ integration })).length).toBeGreaterThan(0);
+
+        // Reproduce the bad service-split state: the integration + source URL
+        // and connection survived, but operation storage and tool rows did not,
+        // while the follow-up migration has marked the connection stale.
+        yield* Effect.promise(() =>
+          config.db.deleteMany("plugin_storage", {
+            where: (b) => b.and(b("plugin_id", "=", "openapi"), b("collection", "=", "operation")),
+          }),
+        );
+        yield* Effect.promise(() =>
+          config.db.deleteMany("tool", {
+            where: (b) => b("integration", "=", String(integration)),
+          }),
+        );
+        yield* Effect.promise(() =>
+          config.db.updateMany("connection", {
+            where: (b) => b("integration", "=", String(integration)),
+            set: { tools_synced_at: null },
+          }),
+        );
+
+        const repaired = yield* executor.tools.list({ integration });
+        expect(
+          repaired.map((tool) => String(tool.name)),
+          "the next catalog read refetches the provider spec and restores tools",
+        ).toContain("items.listItems");
+        const operations = yield* Effect.promise(() =>
+          config.db.findMany("plugin_storage", {
+            where: (b) => b.and(b("plugin_id", "=", "openapi"), b("collection", "=", "operation")),
+          }),
+        );
+        expect(operations.length, "the repaired operation catalog is persisted").toBeGreaterThan(0);
+      }),
+    ),
+  );
+
   it.effect("updateSpec accepts new inline content for blob-sourced integrations", () =>
     Effect.scoped(
       Effect.gen(function* () {

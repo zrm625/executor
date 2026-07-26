@@ -12,13 +12,18 @@ import {
 } from "@executor-js/sdk/client";
 import {
   matchPattern,
+  type Connection,
   type EffectivePolicy,
   type Integration,
   type Owner,
   type ToolAddress,
   type ToolPolicyAction,
 } from "@executor-js/sdk/shared";
-import { integrationsOptimisticAtom, toolsAllAtom } from "@executor-js/react/api/atoms";
+import {
+  connectionsAllAtom,
+  integrationsOptimisticAtom,
+  toolsAllAtom,
+} from "@executor-js/react/api/atoms";
 import { ReactivityKey } from "@executor-js/react/api/reactivity-keys";
 import { useOrganizationSlug } from "@executor-js/react/api/organization-context";
 import {
@@ -159,6 +164,9 @@ const toolMatchId = (tool: ToolRow): string =>
 const toolCanAppearInToolkit = (toolkit: ToolkitResponse, tool: ToolRow): boolean =>
   toolkit.owner === "user" || tool.static === true || tool.owner !== "user";
 
+const connectionCanAppearInToolkit = (toolkit: ToolkitResponse, connection: Connection): boolean =>
+  toolkit.owner === "user" || connection.owner !== "user";
+
 const toolkitUrlFor = (orgSlug: string | undefined, slug: string): string => {
   const path = orgSlug ? `/${orgSlug}/mcp/toolkits/${slug}` : `/mcp/toolkits/${slug}`;
   if (typeof window === "undefined") return path;
@@ -261,8 +269,24 @@ const reducePolicyPatterns = (patterns: readonly string[]): readonly string[] =>
   );
 };
 
-const buildConnectionGroups = (tools: readonly ToolRow[]): readonly ToolkitConnectionGroup[] => {
+const buildConnectionGroups = (
+  tools: readonly ToolRow[],
+  connections: readonly Connection[] = [],
+): readonly ToolkitConnectionGroup[] => {
   const groups = new Map<string, ToolkitConnectionGroup & { tools: ToolRow[] }>();
+  for (const connection of connections) {
+    const integration = String(connection.integration);
+    const name = String(connection.name);
+    const key = `${connection.owner}:${integration}:${name}`;
+    groups.set(key, {
+      id: key,
+      owner: connection.owner,
+      integration,
+      connection: name,
+      patterns: [`${integration}.${connection.owner}.${name}.*`],
+      tools: [],
+    });
+  }
   for (const tool of tools) {
     const owner = toolOwner(tool);
     const key = `${owner}:${tool.integration}:${toolConnectionName(tool)}`;
@@ -285,7 +309,10 @@ const buildConnectionGroups = (tools: readonly ToolRow[]): readonly ToolkitConne
       const sortedTools = [...group.tools].sort(compareTools);
       return {
         ...group,
-        patterns: reducePolicyPatterns(sortedTools.map(connectionPatternForTool)),
+        patterns: reducePolicyPatterns([
+          ...group.patterns,
+          ...sortedTools.map(connectionPatternForTool),
+        ]),
         tools: sortedTools,
       };
     })
@@ -1036,6 +1063,7 @@ function ToolkitWorkspace(props: {
   showOwnerLabels: boolean;
   policies: readonly ToolkitPolicyResponse[];
   connections: readonly ToolkitConnectionResponse[];
+  availableConnections: readonly Connection[];
   tools: readonly ToolRow[];
   integrations: readonly Integration[];
   integrationPlugins: readonly IntegrationPlugin[];
@@ -1053,11 +1081,21 @@ function ToolkitWorkspace(props: {
     () => props.tools.filter((tool) => toolCanAppearInToolkit(props.toolkit, tool)),
     [props.toolkit, props.tools],
   );
-  const connectionGroups = useMemo(() => buildConnectionGroups(visibleTools), [visibleTools]);
+  const visibleConnections = useMemo(
+    () =>
+      props.availableConnections.filter((connection) =>
+        connectionCanAppearInToolkit(props.toolkit, connection),
+      ),
+    [props.availableConnections, props.toolkit],
+  );
+  const connectionGroups = useMemo(
+    () => buildConnectionGroups(visibleTools, visibleConnections),
+    [visibleConnections, visibleTools],
+  );
   const hiddenPersonalConnectionCount = useMemo(() => {
     if (props.toolkit.owner !== "org") return 0;
-    return buildConnectionGroups(props.tools.filter((tool) => toolOwner(tool) === "user")).length;
-  }, [props.toolkit.owner, props.tools]);
+    return props.availableConnections.filter((connection) => connection.owner === "user").length;
+  }, [props.availableConnections, props.toolkit.owner]);
   const configuredConnections = useMemo(
     () =>
       configuredConnectionViews(
@@ -1290,6 +1328,7 @@ function ToolkitDetailSkeleton() {
 function ToolkitDetailView(props: {
   toolkit: ToolkitResponse;
   showOwnerLabels: boolean;
+  availableConnections: readonly Connection[];
   tools: readonly ToolRow[];
   integrations: readonly Integration[];
   integrationPlugins: readonly IntegrationPlugin[];
@@ -1361,6 +1400,7 @@ function ToolkitDetailView(props: {
       showOwnerLabels={props.showOwnerLabels}
       policies={policyRows}
       connections={connectionRows}
+      availableConnections={props.availableConnections}
       tools={props.tools}
       integrations={props.integrations}
       integrationPlugins={props.integrationPlugins}
@@ -1382,6 +1422,7 @@ export function ToolkitsPage(props: PluginPageProps) {
   const integrationPlugins = useIntegrationPlugins();
   const toolkits = useAtomValue(toolkitsAtom);
   const tools = useAtomValue(toolsAllAtom);
+  const availableConnections = useAtomValue(connectionsAllAtom);
   const integrations = useAtomValue(integrationsOptimisticAtom);
   const doCreateToolkit = useAtomSet(createToolkit, { mode: "promiseExit" });
   const doRemoveToolkit = useAtomSet(removeToolkit, { mode: "promiseExit" });
@@ -1392,6 +1433,9 @@ export function ToolkitsPage(props: PluginPageProps) {
     selectedToolkitSlug === null ? null : toolkitByRouteSlug(toolkitRows, selectedToolkitSlug);
 
   const toolRows = AsyncResult.isSuccess(tools) ? (tools.value as readonly ToolRow[]) : [];
+  const availableConnectionRows = AsyncResult.isSuccess(availableConnections)
+    ? (availableConnections.value as readonly Connection[])
+    : [];
   const integrationRows = AsyncResult.isSuccess(integrations)
     ? (integrations.value as readonly Integration[])
     : [];
@@ -1399,6 +1443,8 @@ export function ToolkitsPage(props: PluginPageProps) {
   const toolkitsFailed = AsyncResult.isFailure(toolkits);
   const toolsReady = AsyncResult.isSuccess(tools);
   const toolsFailed = AsyncResult.isFailure(tools);
+  const connectionsReady = AsyncResult.isSuccess(availableConnections);
+  const connectionsFailed = AsyncResult.isFailure(availableConnections);
   const navigateToIndex = () =>
     navigate({
       to: "/{-$orgSlug}/toolkits",
@@ -1447,14 +1493,15 @@ export function ToolkitsPage(props: PluginPageProps) {
           <ToolkitGridSkeleton showOwnerLabels={ownerDisplay.showOwnerLabels} />
         )
       ) : selectedToolkit ? (
-        toolsFailed ? (
+        toolsFailed || connectionsFailed ? (
           <div className="p-6 text-sm text-destructive">Failed to load toolkit tools</div>
-        ) : !toolsReady ? (
+        ) : !toolsReady || !connectionsReady ? (
           <ToolkitDetailSkeleton />
         ) : (
           <ToolkitDetailView
             toolkit={selectedToolkit}
             showOwnerLabels={ownerDisplay.showOwnerLabels}
+            availableConnections={availableConnectionRows}
             tools={toolRows}
             integrations={integrationRows}
             integrationPlugins={integrationPlugins}

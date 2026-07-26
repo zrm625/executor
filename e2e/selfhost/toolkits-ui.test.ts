@@ -27,6 +27,27 @@ const hiddenPersonalSpec = (baseUrl: string): string =>
     },
   });
 
+const connectedGoogleSpec = (): string =>
+  JSON.stringify({
+    openapi: "3.0.3",
+    info: { title: "Gmail", version: "1.0.0" },
+    paths: {
+      "/messages": {
+        get: {
+          operationId: "gmail.users.messages.list",
+          responses: { "200": { description: "Messages" } },
+        },
+      },
+    },
+  });
+
+const connectedWithoutToolsSpec = (): string =>
+  JSON.stringify({
+    openapi: "3.0.3",
+    info: { title: "Gmail", version: "1.0.0" },
+    paths: {},
+  });
+
 scenario(
   "Toolkits · self-host UI creates a toolkit and configures tools",
   { timeout: 180_000 },
@@ -43,6 +64,8 @@ scenario(
     const slug = name;
     const hiddenPersonalIntegration = `${prefix}-personal-api`;
     const hiddenPersonalConnection = "mine";
+    const connectedWithoutToolsIntegration = `${prefix}-gmail`;
+    const connectedWithoutToolsConnection = "localcoregoogle";
     const seededToolkits = [
       { owner: "org" as const, name: `${prefix}-workspace-a` },
       { owner: "org" as const, name: `${prefix}-workspace-b` },
@@ -63,8 +86,20 @@ scenario(
           },
         })
         .pipe(Effect.ignore);
+      yield* client.connections
+        .remove({
+          params: {
+            owner: "org",
+            integration: IntegrationSlug.make(connectedWithoutToolsIntegration),
+            name: ConnectionName.make(connectedWithoutToolsConnection),
+          },
+        })
+        .pipe(Effect.ignore);
       yield* client.openapi
         .removeSpec({ params: { slug: hiddenPersonalIntegration } })
+        .pipe(Effect.ignore);
+      yield* client.openapi
+        .removeSpec({ params: { slug: connectedWithoutToolsIntegration } })
         .pipe(Effect.ignore);
       const listed = yield* client.toolkits.list();
       yield* Effect.forEach(
@@ -103,6 +138,42 @@ scenario(
           value: "unused-token",
         },
       });
+      yield* client.openapi.addSpec({
+        payload: {
+          spec: { kind: "blob", value: connectedGoogleSpec() },
+          slug: IntegrationSlug.make(connectedWithoutToolsIntegration),
+          authenticationTemplate: [
+            {
+              slug: "apiKey",
+              type: "apiKey",
+              headers: { "x-api-key": [{ type: "variable", name: "token" }] },
+            },
+          ],
+        },
+      });
+      yield* client.connections.create({
+        payload: {
+          owner: "org",
+          name: ConnectionName.make(connectedWithoutToolsConnection),
+          integration: IntegrationSlug.make(connectedWithoutToolsIntegration),
+          template: AuthTemplateSlug.make("apiKey"),
+          value: "unused-token",
+        },
+      });
+      yield* client.openapi.updateSpec({
+        params: { slug: connectedWithoutToolsIntegration },
+        payload: { spec: { kind: "blob", value: connectedWithoutToolsSpec() } },
+      });
+      const connectedAccounts = yield* client.connections.list({
+        query: {
+          owner: "org",
+          integration: IntegrationSlug.make(connectedWithoutToolsIntegration),
+        },
+      });
+      expect(
+        connectedAccounts.map((connection) => connection.name),
+        "the Google account remains connected while its refreshed tool catalog is empty",
+      ).toContain(connectedWithoutToolsConnection);
 
       yield* browser.session(identity, async ({ page, step }) => {
         await step("Open the Toolkits plugin page", async () => {
@@ -212,6 +283,24 @@ scenario(
             )
             .waitFor();
         });
+
+        await step(
+          "A connected Google account remains addable before its tools are available",
+          async () => {
+            const dialog = page.getByRole("dialog", { name: "Manage connections" });
+            await dialog
+              .getByLabel("Search connections and tools")
+              .fill(connectedWithoutToolsConnection);
+            await dialog.getByText(connectedWithoutToolsConnection, { exact: true }).waitFor();
+            await dialog.getByText("Gmail · 0 tools", { exact: true }).waitFor();
+            const add = dialog.getByRole("button", { name: /^Add connection / });
+            await add.click();
+            const remove = dialog.getByRole("button", { name: /^Remove connection / });
+            await remove.waitFor();
+            await remove.click();
+            await add.waitFor();
+          },
+        );
 
         await step("Add a connection to the toolkit", async () => {
           const dialog = page.getByRole("dialog", { name: "Manage connections" });

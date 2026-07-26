@@ -7,6 +7,7 @@ import {
   IntegrationDetectionResult,
   IntegrationNotFoundError,
   IntegrationSlug,
+  StorageError,
   ToolResult,
   definePlugin,
   HealthCheckSpec,
@@ -629,6 +630,81 @@ export const openApiPlugin = definePlugin<
       return { specText: config.spec.value };
     });
 
+  const migratedProviderFamilies = new Set(["google", "microsoft"]);
+
+  const repairMissingMigratedProviderCatalog = (input: {
+    readonly ctx: PluginCtx<OpenapiStore>;
+    readonly integration: Integration;
+    readonly current: OpenApiIntegrationConfig;
+    readonly storage: OpenapiStore;
+    readonly httpClientLayer: Layer.Layer<HttpClient.HttpClient, never, never>;
+  }) =>
+    Effect.gen(function* () {
+      const specUrl = input.current.specUrl;
+      if (
+        specUrl === undefined ||
+        input.current.family === undefined ||
+        !migratedProviderFamilies.has(input.current.family)
+      ) {
+        return false;
+      }
+
+      const slug = String(input.integration.slug);
+      const operations = yield* input.storage.listOperations(slug);
+      if (operations.length > 0) return false;
+
+      const resolved = yield* resolveSpecForInput(
+        {
+          spec: { kind: "url", url: specUrl },
+          specFormat: input.current.specFormat,
+          headers: input.current.headers,
+          queryParams: input.current.queryParams,
+          baseUrl: input.current.baseUrl,
+        },
+        input.httpClientLayer,
+      );
+      const compiled = resolved.keepPathItem
+        ? undefined
+        : yield* compileOpenApiSpec(resolved.specText);
+      const specHash = yield* sha256Hex(resolved.specText);
+      yield* input.storage.putSpec(specHash, resolved.specText);
+      if (compiled) {
+        yield* input.storage.putDefs(specHash, JSON.stringify(compiled.hoistedDefs));
+      }
+
+      const nextConfig: OpenApiIntegrationConfig = {
+        ...input.current,
+        specHash,
+        specUrl: resolved.specUrl ?? specUrl,
+      };
+      yield* input.ctx.transaction(
+        Effect.gen(function* () {
+          yield* input.ctx.core.integrations.update(input.integration.slug, {
+            config: nextConfig satisfies OpenApiIntegrationConfig as IntegrationConfig,
+          });
+          if (compiled) {
+            yield* input.storage.putOperations(
+              slug,
+              openApiStoredOperationsFromCompiled(slug, compiled),
+            );
+          } else {
+            yield* compileAndPersistOpenApiSpecStreaming({
+              specText: resolved.specText,
+              integration: slug,
+              storage: input.storage,
+              specHash,
+              keepPathItem: resolved.keepPathItem,
+            });
+          }
+        }),
+      );
+      return true;
+    }).pipe(
+      Effect.withSpan("openapi.plugin.repair_missing_migrated_provider_catalog", {
+        attributes: { "openapi.integration.slug": String(input.integration.slug) },
+      }),
+    );
+
   return {
     id: "openapi" as const,
     packageName: "@executor-js/plugin-openapi",
@@ -1172,8 +1248,37 @@ export const openApiPlugin = definePlugin<
     // operation bindings invokeTool needs are persisted at addSpec time; this
     // hook only shapes the per-connection ToolDefs from the spec blob the
     // catalog config points at.
-    resolveTools: ({ integration, config, storage }) =>
-      resolveOpenApiBackedTools({ integration, config, storage }),
+    resolveTools: (input) =>
+      Effect.gen(function* () {
+        const stored = yield* resolveOpenApiBackedTools(input);
+        if (stored.tools.length > 0 || input.ctx === undefined) return stored;
+
+        const current = decodeOpenApiIntegrationConfig(input.config);
+        if (
+          current?.family === undefined ||
+          !migratedProviderFamilies.has(current.family) ||
+          current.specUrl === undefined
+        ) {
+          return stored;
+        }
+
+        const repaired = yield* repairMissingMigratedProviderCatalog({
+          ctx: input.ctx,
+          integration: input.integration,
+          current,
+          storage: input.storage,
+          httpClientLayer: input.httpClientLayer,
+        }).pipe(
+          Effect.mapError(
+            (cause) =>
+              new StorageError({
+                message: `Failed to repair missing ${current.family} catalog for ${input.integration.slug}`,
+                cause,
+              }),
+          ),
+        );
+        return repaired ? yield* resolveOpenApiBackedTools(input) : stored;
+      }),
 
     invokeTool: ({ ctx: invokeCtx, toolRow, credential, args }) => {
       const httpClientLayer = options?.httpClientLayer ?? invokeCtx.httpClientLayer;
