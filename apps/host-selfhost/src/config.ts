@@ -1,5 +1,15 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 
 import { isValidOrgSlug } from "@executor-js/api";
@@ -17,6 +27,19 @@ import {
 
 export const SELF_HOST_NAMESPACE = "executor_selfhost";
 export const SELF_HOST_SCHEMA_VERSION = "1.0.0";
+export const EXTERNAL_OIDC_PROVIDER_ID = "external-oidc";
+const EXTERNAL_OIDC_CLIENT_SECRET_PATTERN = /^[A-Za-z0-9_-]{64}$/;
+const EXTERNAL_OIDC_CLIENT_ID_PATTERN = /^[\x21-\x7e]{1,128}$/;
+
+export interface SelfHostOidcConfig {
+  readonly issuer: string;
+  readonly providerId: typeof EXTERNAL_OIDC_PROVIDER_ID;
+  readonly authorizationUrl: string;
+  readonly tokenUrl: string;
+  readonly userInfoUrl: string;
+  readonly clientId: string;
+  readonly clientSecret: string;
+}
 
 export interface SelfHostConfig {
   /** Bind address. Defaults to loopback. */
@@ -36,6 +59,8 @@ export interface SelfHostConfig {
   // under the data dir) so a single-container deploy boots with no env; the auth
   // layer still validates an explicitly-set env secret is long enough.
   readonly authSecret: string;
+  /** Additive browser OIDC. Undefined keeps the local-only rollback contract. */
+  readonly oidc: SelfHostOidcConfig | undefined;
   readonly bootstrapAdminEmail: string | undefined;
   readonly bootstrapAdminPassword: string | undefined;
   readonly bootstrapAdminName: string;
@@ -110,6 +135,124 @@ export const resolveAuthSecret = (): string => {
 
 let warnedNoPublicUrl = false;
 
+const resolveOidcClientSecret = (): string => {
+  const direct = process.env.EXECUTOR_OIDC_CLIENT_SECRET;
+  const filePath = process.env.EXECUTOR_OIDC_CLIENT_SECRET_FILE?.trim();
+  if (direct !== undefined && filePath) {
+    // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: ambiguous secret custody must fail before auth starts
+    throw new Error(
+      "Set only one of EXECUTOR_OIDC_CLIENT_SECRET or EXECUTOR_OIDC_CLIENT_SECRET_FILE",
+    );
+  }
+  if (direct !== undefined) {
+    if (!EXTERNAL_OIDC_CLIENT_SECRET_PATTERN.test(direct)) {
+      // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: reject weak or ambiguously encoded confidential-client credentials before auth starts
+      throw new Error("EXECUTOR_OIDC_CLIENT_SECRET must be exactly 64 base64url characters");
+    }
+    return direct;
+  }
+  if (!filePath) {
+    // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: enabled confidential OIDC cannot start without its client credential
+    throw new Error(
+      "EXECUTOR_OIDC_ENABLED=true requires EXECUTOR_OIDC_CLIENT_SECRET or EXECUTOR_OIDC_CLIENT_SECRET_FILE",
+    );
+  }
+
+  const pathMetadata = lstatSync(filePath);
+  if (pathMetadata.isSymbolicLink()) {
+    // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: secret links make custody ambiguous
+    throw new Error(
+      "EXECUTOR_OIDC_CLIENT_SECRET_FILE must be an owner-owned, owner-only regular file containing exactly 64 base64url characters",
+    );
+  }
+
+  // O_NOFOLLOW closes the lstat/open race: a path replaced with a symlink is
+  // still refused. Validate the opened object itself before reading it.
+  const descriptor = openSync(filePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  // oxlint-disable-next-line executor/no-try-catch-or-throw -- boundary: the descriptor must close on every validation/read failure
+  try {
+    const metadata = fstatSync(descriptor);
+    const currentUid = process.getuid?.();
+    if (
+      !metadata.isFile() ||
+      (metadata.mode & 0o077) !== 0 ||
+      (currentUid !== undefined && metadata.uid !== currentUid) ||
+      metadata.size < 64 ||
+      metadata.size > 65
+    ) {
+      // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: refuse secrets with ambiguous ownership, links, broad permissions, or invalid size
+      throw new Error(
+        "EXECUTOR_OIDC_CLIENT_SECRET_FILE must be an owner-owned, owner-only regular file containing exactly 64 base64url characters",
+      );
+    }
+    const contents = readFileSync(descriptor, "utf8");
+    const secret = contents.endsWith("\n") ? contents.slice(0, -1) : contents;
+    if (!EXTERNAL_OIDC_CLIENT_SECRET_PATTERN.test(secret)) {
+      // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: reject weak or ambiguously encoded confidential-client credentials before auth starts
+      throw new Error(
+        "EXECUTOR_OIDC_CLIENT_SECRET_FILE must contain exactly 64 base64url characters",
+      );
+    }
+    return secret;
+  } finally {
+    closeSync(descriptor);
+  }
+};
+
+const resolveRequiredOidcHttpsUrl = (name: string): string => {
+  const value = process.env[name];
+  const parsed = value ? URL.parse(value) : null;
+  const canonical = parsed
+    ? parsed.pathname === "/"
+      ? parsed.origin
+      : `${parsed.origin}${parsed.pathname}`
+    : null;
+  if (
+    !value ||
+    !parsed ||
+    parsed.protocol !== "https:" ||
+    !parsed.hostname ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash ||
+    value !== canonical
+  ) {
+    // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: OIDC trust anchors must be explicit, credential-free HTTPS URLs
+    throw new Error(`${name} must be an exact credential-free HTTPS URL without query or fragment`);
+  }
+  return value;
+};
+
+const resolveOidcClientId = (): string => {
+  const clientId = process.env.EXECUTOR_OIDC_CLIENT_ID;
+  if (!clientId || !EXTERNAL_OIDC_CLIENT_ID_PATTERN.test(clientId)) {
+    // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: an enabled confidential OIDC client needs an unambiguous printable identifier
+    throw new Error(
+      "EXECUTOR_OIDC_CLIENT_ID must contain between 1 and 128 printable non-space ASCII characters",
+    );
+  }
+  return clientId;
+};
+
+export const resolveOidcConfig = (): SelfHostOidcConfig | undefined => {
+  const enabled = process.env.EXECUTOR_OIDC_ENABLED;
+  if (enabled === undefined || enabled === "false") return undefined;
+  if (enabled !== "true") {
+    // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: authentication must not silently enable or disable on a typo
+    throw new Error("EXECUTOR_OIDC_ENABLED must be exactly true or false");
+  }
+  return {
+    issuer: resolveRequiredOidcHttpsUrl("EXECUTOR_OIDC_ISSUER"),
+    providerId: EXTERNAL_OIDC_PROVIDER_ID,
+    authorizationUrl: resolveRequiredOidcHttpsUrl("EXECUTOR_OIDC_AUTHORIZATION_URL"),
+    tokenUrl: resolveRequiredOidcHttpsUrl("EXECUTOR_OIDC_TOKEN_URL"),
+    userInfoUrl: resolveRequiredOidcHttpsUrl("EXECUTOR_OIDC_USERINFO_URL"),
+    clientId: resolveOidcClientId(),
+    clientSecret: resolveOidcClientSecret(),
+  };
+};
+
 // The public origin used to build absolute links (OAuth redirects, MCP OAuth
 // metadata, the connect-card URL). Priority via the shared resolver: an explicit
 // EXECUTOR_WEB_BASE_URL, then a platform-injected origin (zero-config on
@@ -143,6 +286,7 @@ export const loadConfig = (): SelfHostConfig => {
     webBaseUrl: resolveWebBaseUrl(port),
     allowLocalNetwork: process.env.EXECUTOR_ALLOW_LOCAL_NETWORK === "true",
     authSecret: resolveAuthSecret(),
+    oidc: resolveOidcConfig(),
     bootstrapAdminEmail: process.env.EXECUTOR_BOOTSTRAP_ADMIN_EMAIL,
     bootstrapAdminPassword: process.env.EXECUTOR_BOOTSTRAP_ADMIN_PASSWORD,
     bootstrapAdminName: process.env.EXECUTOR_BOOTSTRAP_ADMIN_NAME ?? "Admin",

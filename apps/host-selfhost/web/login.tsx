@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 
 import { Button } from "@executor-js/react/components/button";
 import { Input } from "@executor-js/react/components/input";
@@ -7,6 +7,8 @@ import { Label } from "@executor-js/react/components/label";
 import { authClient } from "./auth-client";
 import { AuthLayout } from "./auth-layout";
 import { mcpAuthorizeResumeTarget, safeReturnTo } from "../src/auth/return-to";
+
+const EXTERNAL_OIDC_PROVIDER_ID = "external-oidc";
 
 // Self-host login: email + password sign-in via Better Auth. On success we
 // reload so the shared AuthProvider re-reads /account/me and the AuthGate swaps
@@ -26,12 +28,63 @@ export const LoginPage = () => {
     mcpAuthorizeResumeTarget(search) ??
     safeReturnTo(new URLSearchParams(search).get("returnTo")) ??
     "/";
-  const [mode, setMode] = useState<"signin" | "code">("signin");
+  const [mode, setMode] = useState<"signin" | "code" | "link">("signin");
+  const [oidcEnabled, setOidcEnabled] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void fetch("/api/auth/oidc-status", { headers: { accept: "application/json" } }).then(
+      async (response) => {
+        const body: unknown = response.ok
+          ? await response.json().then(
+              (value) => value,
+              () => null,
+            )
+          : null;
+        if (
+          active &&
+          body &&
+          typeof body === "object" &&
+          "enabled" in body &&
+          body.enabled === true
+        ) {
+          setOidcEnabled(true);
+        }
+      },
+      () => undefined,
+    );
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (new URLSearchParams(search).has("error")) {
+      setError("External sign-in did not complete. Your local account is unchanged.");
+    }
+  }, [search]);
+
+  const oidcErrorCallback = `/login?error=oidc&returnTo=${encodeURIComponent(postLogin)}`;
+
+  const startOidcSignIn = async () => {
+    setBusy(true);
+    setError(null);
+    const result = await authClient.signIn.oauth2({
+      providerId: EXTERNAL_OIDC_PROVIDER_ID,
+      callbackURL: postLogin,
+      errorCallbackURL: oidcErrorCallback,
+      requestSignUp: false,
+    });
+    if (result.error) {
+      setBusy(false);
+      setError(result.error.message ?? "External sign-in could not start");
+    }
+  };
 
   const signIn = async (event: FormEvent) => {
     event.preventDefault();
@@ -41,6 +94,18 @@ export const LoginPage = () => {
     if (result.error) {
       setBusy(false);
       setError(result.error.message ?? "Sign in failed");
+      return;
+    }
+    if (mode === "link") {
+      const link = await authClient.oauth2.link({
+        providerId: EXTERNAL_OIDC_PROVIDER_ID,
+        callbackURL: postLogin,
+        errorCallbackURL: oidcErrorCallback,
+      });
+      if (link.error) {
+        setBusy(false);
+        setError(link.error.message ?? "External account linking could not start");
+      }
       return;
     }
     window.location.href = postLogin;
@@ -59,16 +124,22 @@ export const LoginPage = () => {
       <div className="w-full max-w-sm space-y-4 rounded-xl border border-border bg-card p-6 shadow-sm">
         <div className="space-y-1">
           <h1 className="text-xl font-semibold tracking-tight text-foreground">
-            {mode === "signin" ? "Sign in" : "Join this instance"}
+            {mode === "signin"
+              ? "Sign in"
+              : mode === "link"
+                ? "Link external login"
+                : "Join this instance"}
           </h1>
           <p className="text-sm text-muted-foreground">
             {mode === "signin"
               ? "Welcome back. Use your instance account."
-              : "Enter the invite code you were given."}
+              : mode === "link"
+                ? "First prove your existing local account, then complete external sign-in."
+                : "Enter the invite code you were given."}
           </p>
         </div>
 
-        {mode === "signin" ? (
+        {mode !== "code" ? (
           <form onSubmit={signIn} className="space-y-4">
             <div className="space-y-1.5">
               <Label htmlFor="email">Email</Label>
@@ -97,7 +168,7 @@ export const LoginPage = () => {
             </div>
             {error && <p className="text-sm text-destructive">{error}</p>}
             <Button type="submit" disabled={busy} className="w-full">
-              {busy ? "…" : "Sign in"}
+              {busy ? "…" : mode === "link" ? "Continue to identity provider" : "Sign in"}
             </Button>
           </form>
         ) : (
@@ -118,6 +189,32 @@ export const LoginPage = () => {
           </form>
         )}
 
+        {oidcEnabled && mode === "signin" && (
+          <div className="space-y-2 border-t border-border pt-4">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={busy}
+              onClick={() => void startOidcSignIn()}
+              className="w-full"
+            >
+              Sign in with identity provider
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => {
+                setMode("link");
+                setError(null);
+              }}
+              className="w-full text-sm font-normal text-muted-foreground hover:text-foreground"
+            >
+              Link external login to an existing account
+            </Button>
+          </div>
+        )}
+
         <div className="text-center">
           <Button
             type="button"
@@ -128,7 +225,7 @@ export const LoginPage = () => {
             }}
             className="text-sm font-normal text-muted-foreground hover:text-foreground"
           >
-            {mode === "signin" ? "Have an invite code? Join" : "Already have an account? Sign in"}
+            {mode === "signin" ? "Have an invite code? Join" : "Back to sign in"}
           </Button>
         </div>
       </div>

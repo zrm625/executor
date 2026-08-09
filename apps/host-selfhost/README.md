@@ -35,6 +35,42 @@ See [`.env.example`](./.env.example) for optional settings (most importantly
 [Self-Hosting guide](../../docs/self-hosting/guide.mdx) for first-run, inviting
 people, backups, reverse-proxy setup, and upgrades.
 
+## Optional external OIDC login
+
+The normal browser login can additionally use an operator-configured external
+OIDC provider. This is opt-in; local email/password login and all existing
+API-key, CLI device, API, and MCP authentication paths remain in place.
+
+Register a confidential OIDC client with this exact redirect URI, substituting
+the public Executor origin:
+
+```text
+https://executor.example.com/api/auth/oauth2/callback/external-oidc
+```
+
+Then set `EXECUTOR_WEB_BASE_URL`, `EXECUTOR_OIDC_ENABLED=true`, and the exact
+`EXECUTOR_OIDC_ISSUER`, `EXECUTOR_OIDC_AUTHORIZATION_URL`,
+`EXECUTOR_OIDC_TOKEN_URL`, `EXECUTOR_OIDC_USERINFO_URL`, and
+`EXECUTOR_OIDC_CLIENT_ID` values supplied by the provider. Every URL must be a
+credential-free HTTPS URL without a query or fragment. Supply exactly one of
+`EXECUTOR_OIDC_CLIENT_SECRET` or `EXECUTOR_OIDC_CLIENT_SECRET_FILE`. A secret
+must be exactly 64 base64url characters. A secret file must be a non-symlink
+regular file owned by the Executor process UID with mode `0600`.
+
+OIDC cannot create an Executor user or silently attach to an email match. Each
+person first signs in with their existing local account and chooses **Link
+external login to an existing account**. Executor then uses authorization code
+with PKCE S256 and `client_secret_basic`, and accepts identity only from the
+configured UserInfo endpoint with a stable subject and verified email. UserInfo
+must be HTTPS JSON, arrive within five seconds, and fit within 16 KiB;
+redirects, malformed or oversized claims, and unverified email fail closed.
+After linking, either login method remains available. Raw ID tokens are not
+persisted; access and refresh tokens are encrypted at rest.
+
+To roll back, set `EXECUTOR_OIDC_ENABLED=false` (or remove it) and restart.
+The OIDC controls disappear; local login and linked account records remain
+unchanged, so re-enabling does not require relinking.
+
 ## Develop
 
 ```bash

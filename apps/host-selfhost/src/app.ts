@@ -109,6 +109,19 @@ export const makeSelfHostApp = async (options: MakeSelfHostAppOptions = {}) => {
         // points at (/device) is a console SPA route
         // (web/chromeless/device-page.tsx).
         HttpRouter.add("GET", "/api/auth/cli-login", cliLoginHandler),
+        // Public capability only, never configuration or secret material. The
+        // login SPA uses this to hide the additive OIDC controls when the
+        // operator selects the local-only rollback configuration.
+        HttpRouter.add(
+          "GET",
+          "/api/auth/oidc-status",
+          HttpEffect.fromWebHandler(
+            async () =>
+              new Response(JSON.stringify({ enabled: betterAuth.oidcEnabled }), {
+                headers: { "content-type": "application/json" },
+              }),
+          ),
+        ),
         // Better Auth owns the rest of /api/auth/*, the full path reaches it.
         HttpRouter.add("*", "/api/auth/*", HttpEffect.fromWebHandler(authHandler)),
         // Browser approval of paused MCP executions: the console resume page

@@ -1,12 +1,20 @@
 import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { APIError } from "better-auth/api";
-import { admin, bearer, deviceAuthorization, mcp, organization } from "better-auth/plugins";
+import {
+  admin,
+  bearer,
+  deviceAuthorization,
+  genericOAuth,
+  mcp,
+  organization,
+  type GenericOAuthConfig,
+} from "better-auth/plugins";
 import { apiKey } from "@better-auth/api-key";
 import { type Client } from "@libsql/client";
 import { LibsqlDialect, type LibsqlDialectConfig } from "@libsql/kysely-libsql";
-import { Context } from "effect";
+import { Context, Option, Schema } from "effect";
 
-import { loadConfig } from "../config";
+import { loadConfig, type SelfHostOidcConfig } from "../config";
 import { seedOrgAndAdmin } from "./seed";
 import { consumeInviteCode, ensureInviteCodeTable, findRedeemableCode } from "./invites";
 
@@ -24,6 +32,143 @@ interface SignupGate {
 // Only self-service email signups are code-gated. Server/admin-initiated user
 // creation (the seed, or a future admin "add user") flows through other paths.
 const SIGNUP_PATH = "/sign-up/email";
+const EXTERNAL_OIDC_USERINFO_TIMEOUT_MS = 5_000;
+const EXTERNAL_OIDC_USERINFO_MAX_BYTES = 16 * 1024;
+const EXTERNAL_OIDC_SUBJECT_MAX_LENGTH = 255;
+const EXTERNAL_OIDC_EMAIL_MAX_LENGTH = 254;
+const EXTERNAL_OIDC_NAME_MAX_LENGTH = 256;
+const EXTERNAL_OIDC_USERNAME_MAX_LENGTH = 128;
+const EXTERNAL_OIDC_PICTURE_MAX_LENGTH = 2_048;
+const decodeUnknownJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
+
+const strictTrimmedString = (value: unknown, maxLength: number): string | null => {
+  if (typeof value !== "string" || value.length === 0 || value.length > maxLength) return null;
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) return null;
+  }
+  const trimmed = value.trim();
+  return trimmed === value && trimmed.length > 0 ? trimmed : null;
+};
+
+const optionalStrictTrimmedString = (
+  value: unknown,
+  maxLength: number,
+): string | undefined | null => {
+  if (value === undefined) return undefined;
+  return strictTrimmedString(value, maxLength);
+};
+
+const readBoundedJson = async (response: Response): Promise<unknown | null> => {
+  const contentType = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (contentType !== "application/json") return null;
+
+  const advertisedLength = response.headers.get("content-length");
+  if (advertisedLength !== null) {
+    const length = Number(advertisedLength);
+    if (!Number.isSafeInteger(length) || length < 0 || length > EXTERNAL_OIDC_USERINFO_MAX_BYTES) {
+      return null;
+    }
+  }
+
+  const reader = response.body?.getReader();
+  if (!reader) return null;
+  const chunks: Array<Uint8Array> = [];
+  let total = 0;
+  while (true) {
+    const next = await reader.read();
+    if (next.done) break;
+    total += next.value.byteLength;
+    if (total > EXTERNAL_OIDC_USERINFO_MAX_BYTES) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(next.value);
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  return Option.getOrElse(decodeUnknownJson(text), () => null);
+};
+
+export const decodeExternalOidcUserInfo = (
+  value: unknown,
+): { id: string; email: string; emailVerified: true; name: string; image?: string } | null => {
+  if (!value || typeof value !== "object") return null;
+  const claims = value as Record<string, unknown>;
+  const id = strictTrimmedString(claims.sub, EXTERNAL_OIDC_SUBJECT_MAX_LENGTH);
+  const rawEmail = strictTrimmedString(claims.email, EXTERNAL_OIDC_EMAIL_MAX_LENGTH);
+  if (!id || !rawEmail || !/^[^\s@]+@[^\s@]+$/.test(rawEmail) || claims.email_verified !== true) {
+    return null;
+  }
+  const email = rawEmail.toLowerCase();
+  const name = optionalStrictTrimmedString(claims.name, EXTERNAL_OIDC_NAME_MAX_LENGTH);
+  const username = optionalStrictTrimmedString(
+    claims.preferred_username,
+    EXTERNAL_OIDC_USERNAME_MAX_LENGTH,
+  );
+  if (name === null || username === null) return null;
+  const displayName = name ?? username ?? email;
+  const picture = optionalStrictTrimmedString(claims.picture, EXTERNAL_OIDC_PICTURE_MAX_LENGTH);
+  if (picture === null) return null;
+  const imageUrl = picture ? URL.parse(picture) : null;
+  if (picture && !imageUrl) return null;
+  if (imageUrl && (imageUrl.protocol !== "https:" || imageUrl.username || imageUrl.password)) {
+    return null;
+  }
+  return {
+    id,
+    email,
+    emailVerified: true,
+    name: displayName,
+    ...(imageUrl ? { image: imageUrl.href } : {}),
+  };
+};
+
+export const makeExternalOidcConfig = (oidc: SelfHostOidcConfig): GenericOAuthConfig => ({
+  providerId: oidc.providerId,
+  issuer: oidc.issuer,
+  requireIssuerValidation: true,
+  authorizationUrl: oidc.authorizationUrl,
+  tokenUrl: oidc.tokenUrl,
+  userInfoUrl: oidc.userInfoUrl,
+  clientId: oidc.clientId,
+  clientSecret: oidc.clientSecret,
+  scopes: ["openid", "profile", "email"],
+  responseType: "code",
+  pkce: true,
+  authentication: "basic",
+  disableImplicitSignUp: true,
+  disableSignUp: true,
+  overrideUserInfo: false,
+  // Better Auth's generic plugin otherwise decodes ID-token claims without
+  // verifying their signature. Always obtain identity from the operator-pinned
+  // HTTPS UserInfo endpoint instead, and require a stable subject plus a
+  // provider-verified email before linking or signing in.
+  getUserInfo: async (tokens) => {
+    if (!tokens.accessToken) return null;
+    const response = await fetch(oidc.userInfoUrl, {
+      method: "GET",
+      headers: { authorization: `Bearer ${tokens.accessToken}` },
+      redirect: "error",
+      signal: AbortSignal.timeout(EXTERNAL_OIDC_USERINFO_TIMEOUT_MS),
+    }).then(
+      (value) => value,
+      () => null,
+    );
+    if (!response?.ok) return null;
+    const body = await readBoundedJson(response).then(
+      (value) => value,
+      () => null,
+    );
+    return decodeExternalOidcUserInfo(body);
+  },
+});
 
 // ---------------------------------------------------------------------------
 // Better Auth instance over the SAME libSQL CONNECTION as the FumaDB executor
@@ -99,6 +244,14 @@ const makeAuthOptions = (client: Client, getOrganizationId: () => string, gate?:
     baseURL: config.webBaseUrl,
     trustedOrigins: [config.webBaseUrl],
     emailAndPassword: { enabled: true },
+    account: {
+      encryptOAuthTokens: true,
+      accountLinking: {
+        enabled: true,
+        disableImplicitLinking: true,
+        allowDifferentEmails: false,
+      },
+    },
     // `apiKey` issues long-lived personal keys (the API-keys page). With
     // `enableSessionForAPIKeys`, presenting a key resolves to its owner's
     // session — so a key works as a Bearer token for the API + MCP endpoint.
@@ -114,6 +267,12 @@ const makeAuthOptions = (client: Client, getOrganizationId: () => string, gate?:
       admin(),
       apiKey({ enableSessionForAPIKeys: true, rateLimit: { enabled: false } }),
       bearer(),
+      // Additive normal-plane browser login. With no OIDC configuration this
+      // plugin has no provider and local email/password remains the exact
+      // rollback path. New OIDC users cannot be created, and a matching email
+      // is never linked implicitly: the user must first authenticate locally
+      // and deliberately invoke the plugin's session-gated /oauth2/link flow.
+      genericOAuth({ config: config.oidc ? [makeExternalOidcConfig(config.oidc)] : [] }),
       // RFC 8628 device authorization, the CLI `executor login` flow. Registers
       // /device/code + /device/token + the approval endpoints; the issued token
       // is an opaque session that `bearer()` (above) accepts as `Authorization:
@@ -136,6 +295,22 @@ const makeAuthOptions = (client: Client, getOrganizationId: () => string, gate?:
       }),
     ],
     databaseHooks: {
+      // Generic OAuth stores the raw ID token even when encryptOAuthTokens is
+      // enabled. Executor never needs it after verified UserInfo is resolved,
+      // so scrub it on both initial link and subsequent sign-in refresh. Access
+      // and refresh tokens continue through Better Auth's AES-256-GCM storage.
+      account: {
+        create: {
+          before: async (account: Record<string, unknown>) => ({
+            data: { ...account, idToken: null },
+          }),
+        },
+        update: {
+          before: async (account: Record<string, unknown>) => ({
+            data: { ...account, idToken: null },
+          }),
+        },
+      },
       session: {
         create: {
           // Single-org instance: pin every session to the one organization, so
@@ -249,6 +424,7 @@ export interface BetterAuthHandle {
   readonly organizationName: string;
   /** URL slug for org-prefixed console paths (`/<slug>/policies`). */
   readonly organizationSlug: string;
+  readonly oidcEnabled: boolean;
   readonly handler: (request: Request) => Promise<Response>;
 }
 
@@ -307,6 +483,7 @@ export const buildBetterAuth = async (client: Client): Promise<BetterAuthHandle>
     organizationId,
     organizationName,
     organizationSlug: config.orgSlug,
+    oidcEnabled: config.oidc !== undefined,
     handler: auth.handler,
   };
 };

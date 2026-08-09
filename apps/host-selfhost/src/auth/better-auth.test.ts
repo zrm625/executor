@@ -11,13 +11,100 @@ process.env.EXECUTOR_DATA_DIR = mkdtempSync(join(tmpdir(), "eh-auth-"));
 process.env.BETTER_AUTH_SECRET = "test-secret-0123456789-abcdefghijklmnop-qrstuv";
 process.env.EXECUTOR_BOOTSTRAP_ADMIN_EMAIL = "admin@test.local";
 process.env.EXECUTOR_BOOTSTRAP_ADMIN_PASSWORD = "admin-password-123";
+process.env.EXECUTOR_WEB_BASE_URL = "https://executor.example.test";
+process.env.EXECUTOR_OIDC_ENABLED = "true";
+process.env.EXECUTOR_OIDC_ISSUER = "https://identity.example.test";
+process.env.EXECUTOR_OIDC_AUTHORIZATION_URL = "https://identity.example.test/oauth2/authorize";
+process.env.EXECUTOR_OIDC_TOKEN_URL = "https://identity.example.test/oauth2/token";
+process.env.EXECUTOR_OIDC_USERINFO_URL = "https://identity.example.test/oauth2/userinfo";
+process.env.EXECUTOR_OIDC_CLIENT_ID = "executor-test";
+process.env.EXECUTOR_OIDC_CLIENT_SECRET = "A".repeat(64);
 
 const { makeSelfHostApiHandler } = await import("../app");
 
 const { handler, dispose } = await makeSelfHostApiHandler();
 afterAll(() => dispose());
 
-const BASE = "http://localhost:4788";
+const BASE = "https://executor.example.test";
+const PROVIDER_ID = "external-oidc";
+
+test("OIDC capability and authorization request preserve the exact native callback contract", async () => {
+  const status = await handler(new Request(`${BASE}/api/auth/oidc-status`));
+  expect(status.status).toBe(200);
+  await expect(status.json()).resolves.toEqual({ enabled: true });
+
+  const started = await handler(
+    new Request(`${BASE}/api/auth/sign-in/oauth2`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: BASE },
+      body: JSON.stringify({
+        providerId: PROVIDER_ID,
+        callbackURL: "/",
+        errorCallbackURL: "/login?error=oidc",
+        requestSignUp: false,
+      }),
+    }),
+  );
+  expect(started.status).toBe(200);
+  const body = (await started.json()) as { url: string; redirect: boolean };
+  const authorization = new URL(body.url);
+  expect(authorization.origin + authorization.pathname).toBe(
+    "https://identity.example.test/oauth2/authorize",
+  );
+  expect(authorization.searchParams.get("client_id")).toBe("executor-test");
+  expect(authorization.searchParams.get("response_type")).toBe("code");
+  expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
+  expect(authorization.searchParams.get("code_challenge")).toBeTruthy();
+  expect(authorization.searchParams.get("redirect_uri")).toBe(
+    "https://executor.example.test/api/auth/oauth2/callback/external-oidc",
+  );
+
+  // The callback is owned by Better Auth, not the SPA fallback. Even an
+  // incomplete browser callback is handled as an auth error rather than a 404,
+  // which protects direct navigation and reverse-proxy deep links.
+  const callback = await handler(
+    new Request(`${BASE}/api/auth/oauth2/callback/external-oidc?error=access_denied`),
+  );
+  expect(callback.status).not.toBe(404);
+});
+
+test("OIDC account linking requires an existing local session", async () => {
+  const unauthenticated = await handler(
+    new Request(`${BASE}/api/auth/oauth2/link`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: BASE },
+      body: JSON.stringify({ providerId: PROVIDER_ID, callbackURL: "/" }),
+    }),
+  );
+  expect(unauthenticated.status).toBe(401);
+
+  const signedIn = await handler(
+    new Request(`${BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: BASE },
+      body: JSON.stringify({ email: "admin@test.local", password: "admin-password-123" }),
+    }),
+  );
+  expect(signedIn.status).toBe(200);
+  const cookie = signedIn.headers.get("set-cookie");
+  expect(cookie).toBeTruthy();
+
+  const linked = await handler(
+    new Request(`${BASE}/api/auth/oauth2/link`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: BASE, cookie: cookie! },
+      body: JSON.stringify({ providerId: PROVIDER_ID, callbackURL: "/" }),
+    }),
+  );
+  expect(linked.status).toBe(200);
+  const linkBody = (await linked.json()) as { url: string; redirect: boolean };
+  expect(linkBody.redirect).toBe(true);
+  const authorization = new URL(linkBody.url);
+  expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
+  expect(authorization.searchParams.get("redirect_uri")).toBe(
+    "https://executor.example.test/api/auth/oauth2/callback/external-oidc",
+  );
+});
 
 test("migrations create both the Better Auth and FumaDB executor schema regions", async () => {
   // Open a SEPARATE libSQL connection to the same file Better Auth (via its own
