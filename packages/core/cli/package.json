@@ -44,13 +44,13 @@
     "@executor-js/sdk": "workspace:*",
     "commander": "^12.1.0",
     "effect": "catalog:",
-    "jiti": "^2.6.1"
+    "jiti": "^2.7.0"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
     "@types/node": "catalog:",
     "tsup": "catalog:",
     "typescript": "catalog:",
-    "vitest": "^4.1.4"
+    "vitest": "^4.1.11"
   }
 }

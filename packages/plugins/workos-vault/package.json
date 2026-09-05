@@ -54,7 +54,7 @@
   },
   "dependencies": {
     "@executor-js/sdk": "workspace:*",
-    "@workos-inc/node": "^8.11.1"
+    "@workos-inc/node": "^8.13.0"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",

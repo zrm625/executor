@@ -30,17 +30,17 @@
     "@executor-js/runtime-quickjs": "workspace:*",
     "@executor-js/sdk": "workspace:*",
     "@jitl/quickjs-wasmfile-release-sync": "catalog:",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "@sentry/bun": "^10.57.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@sentry/bun": "^10.73.0",
     "effect": "catalog:",
     "quickjs-emscripten": "catalog:"
   },
   "devDependencies": {
-    "@cloudflare/worker-bundler": "0.2.1",
+    "@cloudflare/worker-bundler": "0.2.3",
     "@effect/vitest": "catalog:",
     "@types/node": "catalog:",
     "bun-types": "catalog:",
-    "esbuild": "^0.27.3",
+    "esbuild": "^0.27.7",
     "typescript": "catalog:",
     "vitest": "catalog:"
   }

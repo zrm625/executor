@@ -39,14 +39,7 @@
 // invalidate the cache and retry on a bad signature.
 // ---------------------------------------------------------------------------
 
-import {
-  createLocalJWKSet,
-  type FlattenedJWSInput,
-  type JSONWebKeySet,
-  type JWTHeaderParameters,
-  type JWTVerifyGetKey,
-  type KeyLike,
-} from "jose";
+import { createLocalJWKSet, type JSONWebKeySet, type JWTVerifyGetKey } from "jose";
 import { Schema } from "effect";
 import { JWKSNoMatchingKey } from "jose/errors";
 
@@ -139,7 +132,7 @@ const isJwksNoMatchingKey = (cause: unknown): boolean =>
 interface CacheEntry {
   jwks: JSONWebKeySet;
   fetchedAt: number;
-  resolver: (protectedHeader: JWTHeaderParameters, token?: FlattenedJWSInput) => Promise<KeyLike>;
+  resolver: ReturnType<typeof createLocalJWKSet>;
 }
 
 const entryFrom = (stored: StoredJwks): CacheEntry => ({

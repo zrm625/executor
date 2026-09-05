@@ -6,7 +6,7 @@ import {
   jwtVerify,
   type JSONWebKeySet,
   type JWK,
-  type KeyLike,
+  type GenerateKeyPairResult,
 } from "jose";
 
 import { createCachedRemoteJWKSet, type JwksStore, type StoredJwks } from "./jwks-cache";
@@ -18,7 +18,7 @@ const jwksUrl = new URL("https://test-authkit.example.com/oauth2/jwks");
 interface Keypair {
   readonly kid: string;
   readonly publicJwk: JWK;
-  readonly privateKey: KeyLike;
+  readonly privateKey: GenerateKeyPairResult["privateKey"];
 }
 
 const generateRotatableKeypair = async (kid: string): Promise<Keypair> => {

@@ -19,10 +19,8 @@ export default defineConfig({
   testDir: "tests",
   server: {
     command: "bun",
-    // `--artifacts` because artifacts are opt-in per MCP connection: a bare
-    // `executor mcp` serves no artifact tools and no ui:// shell resource, so
-    // there would be nothing for sunpeak to mount.
-    args: [resolve(repo, "apps/cli/bin/executor.ts"), "mcp", "--artifacts"],
+    // The artifact tools and shell resource are served by default.
+    args: [resolve(repo, "apps/cli/bin/executor.ts"), "mcp"],
     env: {
       EXECUTOR_DATA_DIR: resolve(here, ".exdata"),
     },

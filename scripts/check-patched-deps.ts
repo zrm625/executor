@@ -32,6 +32,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(import.meta.dir, "..");
 
@@ -66,6 +67,23 @@ const resolveFrom = (specifier: string, fromPackageDir: string): string => {
 };
 
 const runtimeChecks: readonly RuntimeCheck[] = [
+  {
+    package: "@cloudflare/vite-plugin@1.32.3",
+    purpose: "omit browser credentials when forwarding requests to Miniflare",
+    resolveEntry: () => {
+      const override = process.env.CHECK_PATCHED_DEPS_CLOUDFLARE_VITE;
+      if (override && override.length > 0) return resolve(override);
+      return fileURLToPath(
+        import.meta.resolve(
+          "@cloudflare/vite-plugin",
+          resolve(repoRoot, "apps/cloud/package.json"),
+        ),
+      );
+    },
+    sentinels: [
+      '\t\tbody: request$1.body,\n\t\tduplex: "half",\n\t\tsignal: request$1.signal,\n\t\tcredentials: "omit"',
+    ],
+  },
   {
     package: "agents@0.17.3 (agents/mcp)",
     purpose:

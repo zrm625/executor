@@ -47,8 +47,8 @@
     "@cfworker/json-schema": "^4.1.1",
     "@executor-js/execution": "workspace:*",
     "@executor-js/sdk": "workspace:*",
-    "@modelcontextprotocol/ext-apps": "^1.7.4",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/ext-apps": "^1.7.5",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "effect": "catalog:",
     "zod": "4.3.6"
   },
