@@ -43,12 +43,12 @@
     "@executor-js/execution": "workspace:*",
     "@executor-js/host-mcp": "workspace:*",
     "@executor-js/sdk": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "agents": "0.17.3",
     "effect": "catalog:"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250620.0",
+    "@cloudflare/workers-types": "4.20260415.1",
     "@effect/vitest": "catalog:",
     "@types/node": "catalog:",
     "bun-types": "catalog:",

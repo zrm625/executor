@@ -351,7 +351,9 @@ const makeAuthOptions = (client: Client, getOrganizationId: () => string, gate?:
       // client_id is accepted (the CLI presents "executor-cli"). `verificationUri`
       // is the page the user opens to confirm the code — the self-host app serves
       // it at /device (this is also the Better Auth default; pinned for clarity).
-      deviceAuthorization({ verificationUri: "/device" }),
+      // An explicit empty customization preserves the default device schema.
+      // Zod requires this Better Auth option to be present.
+      deviceAuthorization({ verificationUri: "/device", schema: {} }),
       // The operator-configured SSO provider (see config.ts), spoken over plain
       // OIDC discovery so Google, Okta, Entra, or any compliant IdP slots in —
       // and so tests can point it at an emulated IdP. The domain gate below is

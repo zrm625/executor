@@ -35,21 +35,21 @@
     "@executor-js/runtime-quickjs": "workspace:*",
     "@executor-js/sdk": "workspace:*",
     "@jitl/quickjs-wasmfile-release-sync": "catalog:",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@tanstack/react-router": "catalog:",
     "drizzle-orm": "catalog:",
     "effect": "catalog:",
-    "jose": "^5.9.6",
+    "jose": "^6.2.12",
     "quickjs-emscripten-core": "0.31.0",
     "react": "catalog:",
     "react-dom": "catalog:"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20250410.0",
+    "@cloudflare/workers-types": "4.20260415.1",
     "@effect/vitest": "catalog:",
     "@executor-js/vite-plugin": "workspace:*",
     "@tailwindcss/vite": "catalog:",
-    "@tanstack/router-plugin": "^1.167.12",
+    "@tanstack/router-plugin": "1.167.22",
     "@tanstack/virtual-file-routes": "^1.162.0",
     "@types/node": "catalog:",
     "@types/react": "catalog:",
@@ -59,6 +59,6 @@
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "catalog:",
-    "wrangler": "^4.95.0"
+    "wrangler": "4.85.0"
   }
 }

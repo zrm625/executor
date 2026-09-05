@@ -11,7 +11,7 @@ import {
   generateKeyPair,
   type JSONWebKeySet,
   type JWK,
-  type KeyLike,
+  type GenerateKeyPairResult,
 } from "jose";
 
 import { WorkOSClient, collectRawWorkOSList, collectWorkOSList } from "./workos";
@@ -30,7 +30,7 @@ const USER = {
 interface Keypair {
   readonly kid: string;
   readonly publicJwk: JWK;
-  readonly privateKey: KeyLike;
+  readonly privateKey: GenerateKeyPairResult["privateKey"];
 }
 
 interface RecordedRequest {
