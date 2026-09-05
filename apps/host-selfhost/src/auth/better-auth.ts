@@ -9,12 +9,14 @@ import {
   organization,
   type GenericOAuthConfig,
 } from "better-auth/plugins";
+import { parseState } from "better-auth/oauth2";
 import { apiKey } from "@better-auth/api-key";
 import { type Client } from "@libsql/client";
 import { LibsqlDialect, type LibsqlDialectConfig } from "@libsql/kysely-libsql";
 import { Context, Option, Schema } from "effect";
 
 import { loadConfig, type SelfHostOidcConfig } from "../config";
+import { safeReturnTo } from "./return-to";
 import { seedOrgAndAdmin } from "./seed";
 import { consumeInviteCode, ensureInviteCodeTable, findRedeemableCode } from "./invites";
 import { isAdmitted, isOAuthCallback, ssoProviderConfig } from "./sso";
@@ -284,6 +286,14 @@ const makeAuthOptions = (client: Client, getOrganizationId: () => string, gate?:
           config.sso !== undefined &&
           context.params?.providerId === config.sso.providerId
         ) {
+          if (context.query?.error) {
+            // Generic OAuth handles provider denial before reading its state.
+            // Validate the state here so the saved login return path is retained.
+            const state = await parseState(context);
+            const destination = safeReturnTo(state.errorURL) ?? "/login?error=sso";
+            // oxlint-disable-next-line executor/no-try-catch-or-throw -- boundary: Better Auth represents redirect responses with APIError
+            throw context.redirect(destination);
+          }
           // Better Auth merges this into a fresh request context. Never mutate
           // shared options: concurrent external callbacks must remain explicit-link only.
           return {

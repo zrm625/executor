@@ -66,7 +66,12 @@ must be HTTPS JSON, arrive within five seconds, and fit within 16 KiB;
 redirects, malformed or oversized claims, and unverified email fail closed.
 The separate `EXECUTOR_SSO_*` provider can coexist with external OIDC. Its
 verified-domain signup and verified-email linking behavior remains independent;
-`external-oidc` is reserved and cannot be used as its provider ID.
+`external-oidc` is reserved and cannot be used as its provider ID. Existing
+setup or invite accounts can choose **Link <provider> to an existing account**
+on the login page, prove their local password, and approve the matching,
+verified provider identity. No local email-verification delivery or database
+edit is needed. SSO linking still requires an allowed provider email domain;
+failed sign-in or linking returns to the login form with the requested page retained.
 After linking, either login method remains available. Raw ID tokens are not
 persisted; access and refresh tokens are encrypted at rest.
 

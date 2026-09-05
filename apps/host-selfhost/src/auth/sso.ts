@@ -1,3 +1,6 @@
+import { APIError, getOAuthState } from "better-auth/api";
+import { safeReturnTo } from "./return-to";
+
 import { type SsoConfig } from "../config";
 
 // Better Auth serves OAuth sign-in callbacks at `/oauth2/callback/:providerId`
@@ -40,6 +43,23 @@ export const ssoProviderConfig = (sso: SsoConfig) => ({
   discoveryUrl: sso.discoveryUrl,
   scopes: ["openid", "email", "profile"],
   pkce: true,
+  mapProfileToUser: async (profile: Record<string, unknown>) => {
+    const state = await getOAuthState();
+    if (
+      state?.link &&
+      !isAdmitted(sso, {
+        email: typeof profile.email === "string" ? profile.email : "",
+        emailVerified: profile.emailVerified === true,
+      })
+    ) {
+      // Explicit linking bypasses the new-user hook, so enforce admission here too.
+      // oxlint-disable-next-line executor/no-try-catch-or-throw -- boundary: Better Auth represents redirects with APIError
+      throw new APIError("FOUND", undefined, {
+        location: safeReturnTo(state.errorURL) ?? "/login?error=sso",
+      });
+    }
+    return {};
+  },
   ...(sso.providerId === "google" && sso.allowedDomains.length === 1
     ? { authorizationUrlParams: { hd: sso.allowedDomains[0]! } }
     : {}),

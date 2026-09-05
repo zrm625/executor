@@ -27,6 +27,7 @@ export const LoginPage = () => {
   // deep link (`/connect/linear`) across sign-in — see `postLoginTarget`.
   const postLogin = postLoginTarget(window.location);
   const [mode, setMode] = useState<"signin" | "code" | "link">("signin");
+  const [linkProviderId, setLinkProviderId] = useState(EXTERNAL_OIDC_PROVIDER_ID);
   const [oidcEnabled, setOidcEnabled] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -107,7 +108,7 @@ export const LoginPage = () => {
     }
     if (mode === "link") {
       const link = await authClient.oauth2.link({
-        providerId: EXTERNAL_OIDC_PROVIDER_ID,
+        providerId: linkProviderId,
         callbackURL: postLogin,
         errorCallbackURL: oidcErrorCallback,
       });
@@ -129,6 +130,7 @@ export const LoginPage = () => {
     const result = await authClient.signIn.oauth2({
       providerId,
       callbackURL: postLogin,
+      errorCallbackURL: oidcErrorCallback,
     });
     if (result.error) {
       setBusy(false);
@@ -203,16 +205,30 @@ export const LoginPage = () => {
                   <div className="h-px flex-1 bg-border" />
                 </div>
                 {ssoProviders.map((provider) => (
-                  <Button
-                    key={provider.id}
-                    type="button"
-                    variant="outline"
-                    disabled={busy}
-                    onClick={() => void signInWithSso(provider.id)}
-                    className="w-full"
-                  >
-                    Continue with {provider.name}
-                  </Button>
+                  <div key={provider.id} className="space-y-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => void signInWithSso(provider.id)}
+                      className="w-full"
+                    >
+                      Continue with {provider.name}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      disabled={busy}
+                      className="w-full"
+                      onClick={() => {
+                        setLinkProviderId(provider.id);
+                        setMode("link");
+                        setError(null);
+                      }}
+                    >
+                      Link {provider.name} to an existing account
+                    </Button>
+                  </div>
                 ))}
               </>
             )}
@@ -251,6 +267,7 @@ export const LoginPage = () => {
               variant="ghost"
               disabled={busy}
               onClick={() => {
+                setLinkProviderId(EXTERNAL_OIDC_PROVIDER_ID);
                 setMode("link");
                 setError(null);
               }}

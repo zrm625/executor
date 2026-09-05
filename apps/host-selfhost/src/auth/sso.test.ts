@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterAll, describe, expect, it, test } from "@effect/vitest";
-import { createClient } from "@libsql/client";
 import { createEmulator } from "@executor-js/emulate";
 
 import { mintInviteCode } from "../testing/mint-invite";
@@ -230,12 +229,19 @@ const formFields = (form: string): Record<string, string> => {
 // Drive the whole flow as the given IdP account: sign-in redirect -> IdP
 // consent page (pick the account's form) -> callback back into the app.
 // Returns the callback response plus the cookies it set.
-const signInThroughIdp = async (email: string) => {
+const signInThroughIdp = async (email: string, sessionCookie?: string) => {
   const start = await handler(
-    new Request(`${BASE}/api/auth/sign-in/oauth2`, {
+    new Request(`${BASE}/api/auth/${sessionCookie ? "oauth2/link" : "sign-in/oauth2"}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ providerId: "okta", callbackURL: "/" }),
+      headers: {
+        "content-type": "application/json",
+        ...(sessionCookie ? { cookie: sessionCookie } : {}),
+      },
+      body: JSON.stringify({
+        providerId: "okta",
+        callbackURL: "/",
+        errorCallbackURL: "/login?error=sso&returnTo=%2Fapi-keys",
+      }),
     }),
   );
   expect(start.status).toBe(200);
@@ -262,7 +268,11 @@ const signInThroughIdp = async (email: string) => {
   const callbackUrl = consent.headers.get("location")!;
   expect(callbackUrl.startsWith(CALLBACK)).toBe(true);
 
-  const callback = await handler(new Request(callbackUrl, { headers: { cookie: stateCookies } }));
+  const callback = await handler(
+    new Request(callbackUrl, {
+      headers: { cookie: [sessionCookie, stateCookies].filter(Boolean).join("; ") },
+    }),
+  );
   const cookies = callback.headers
     .getSetCookie()
     .map((cookie) => cookie.split(";")[0]!)
@@ -294,7 +304,9 @@ test("an IdP account outside the allowlist is refused and gets no session", asyn
   // The rejection surfaces as better-auth's error redirect, not a success.
   expect(callback.status).toBe(302);
   expect(callback.headers.get("location")).not.toBe("/");
-  expect(callback.headers.get("location")).toContain("error");
+  const errorLocation = new URL(callback.headers.get("location")!, BASE);
+  expect(errorLocation.pathname).toBe("/login");
+  expect(errorLocation.searchParams.get("returnTo")).toBe("/api-keys");
 
   const session = await handler(
     new Request(`${BASE}/api/auth/get-session`, { headers: { cookie: cookies } }),
@@ -337,8 +349,16 @@ test("email signup without an invite is still refused with an SSO provider confi
   expect(signUp.status).toBe(403);
 });
 
-test("SSO still links a verified matching email to an existing local account", async () => {
+test("an invited local account adopts SSO through authenticated explicit linking", async () => {
   await createIdpUser("existing@example.com", "Existing");
+  const unauthenticated = await handler(
+    new Request(`${BASE}/api/auth/oauth2/link`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ providerId: "okta", callbackURL: "/" }),
+    }),
+  );
+  expect(unauthenticated.status).toBe(401);
   const inviteCode = await mintInviteCode(handler);
   const signUp = await handler(
     new Request(`${BASE}/api/auth/sign-up/email`, {
@@ -353,14 +373,27 @@ test("SSO still links a verified matching email to an existing local account", a
     }),
   );
   expect(signUp.status).toBe(200);
-  const local = (await signUp.json()) as { user: { id: string } };
-  // Upstream requires proof of both the local and provider email before linking.
-  const db = createClient({ url: `file:${join(process.env.EXECUTOR_DATA_DIR!, "data.db")}` });
-  await db.execute({
-    sql: "UPDATE user SET emailVerified = 1 WHERE id = ?",
-    args: [local.user.id],
-  });
-  db.close();
+  const local = (await signUp.json()) as { user: { id: string; emailVerified: boolean } };
+  expect(local.user.emailVerified).toBe(false);
+  expect(
+    (await signInThroughIdp("existing@example.com")).callback.headers.get("location"),
+  ).toContain("account_not_linked");
+  const localSignIn = await handler(
+    new Request(`${BASE}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "existing@example.com", password: "existing-password-123" }),
+    }),
+  );
+  expect(localSignIn.status).toBe(200);
+  const localCookie = localSignIn.headers
+    .getSetCookie()
+    .map((cookie) => cookie.split(";")[0]!)
+    .join("; ");
+  const mismatched = await signInThroughIdp("alice@example.com", localCookie);
+  expect(mismatched.callback.headers.get("location")).toContain("email_doesn");
+  const linked = await signInThroughIdp("existing@example.com", localCookie);
+  expect(linked.callback.headers.get("location")).toBe("/");
   const { callback, cookies } = await signInThroughIdp("existing@example.com");
   expect(callback.status).toBe(302);
   expect(callback.headers.get("location")).toBe("/");
@@ -369,4 +402,32 @@ test("SSO still links a verified matching email to an existing local account", a
   );
   const signedIn = (await session.json()) as { user: { id: string } };
   expect(signedIn.user.id).toBe(local.user.id);
+});
+
+test("provider denial returns to login with the saved deep link", async () => {
+  const start = await handler(
+    new Request(`${BASE}/api/auth/sign-in/oauth2`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        providerId: "okta",
+        callbackURL: "/api-keys",
+        errorCallbackURL: "/login?error=sso&returnTo=%2Fapi-keys",
+      }),
+    }),
+  );
+  expect(start.status).toBe(200);
+  const { url } = (await start.json()) as { url: string };
+  const denied = new URL(CALLBACK);
+  denied.searchParams.set("state", new URL(url).searchParams.get("state")!);
+  denied.searchParams.set("error", "access_denied");
+  const cookie = start.headers
+    .getSetCookie()
+    .map((value) => value.split(";")[0]!)
+    .join("; ");
+  const response = await handler(new Request(denied, { headers: { cookie } }));
+  expect(response.status).toBe(302);
+  const destination = new URL(response.headers.get("location")!, BASE);
+  expect(destination.pathname).toBe("/login");
+  expect(destination.searchParams.get("returnTo")).toBe("/api-keys");
 });

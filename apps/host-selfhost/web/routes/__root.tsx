@@ -211,6 +211,18 @@ function RootComponent() {
     );
   }
 
+  // A failed account-link callback still has its local session. Keep the
+  // recovery form visible instead of rendering the empty public login leaf.
+  if (pathname === "/login") {
+    return (
+      <AuthProvider>
+        <AuthGate>
+          <LoginPage />
+        </AuthGate>
+      </AuthProvider>
+    );
+  }
+
   // The MCP OAuth approval screen: chromeless (no shell) but inside the auth
   // gate — the user is already signed in (Better Auth's authorize requires a
   // session before redirecting here). Rendered directly (static import), not as
