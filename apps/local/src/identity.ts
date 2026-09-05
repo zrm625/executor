@@ -31,6 +31,7 @@ import { safeEqual } from "./serve-shared";
  * cwd-derived (in `app.ts`), independent of these ids.
  */
 export const LOCAL_PRINCIPAL: Principal = {
+  kind: "member",
   accountId: "local",
   organizationId: "local",
   organizationName: "Local",
@@ -38,6 +39,7 @@ export const LOCAL_PRINCIPAL: Principal = {
   name: "Local",
   avatarUrl: null,
   roles: [],
+  orgRoleModel: "none",
 };
 
 const bearerToken = (headers: Headers): string | undefined => {

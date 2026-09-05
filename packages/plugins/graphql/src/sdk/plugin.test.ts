@@ -16,6 +16,8 @@ import {
   ProviderKey,
   ToolAddress,
   createExecutor,
+  endpointForTelemetry,
+  makeInMemoryBlobStore,
 } from "@executor-js/sdk";
 import {
   makeTestConfig,
@@ -24,7 +26,6 @@ import {
 } from "@executor-js/sdk/testing";
 
 import { graphqlPlugin } from "./plugin";
-import { endpointForTelemetry } from "./invoke";
 import { introspect } from "./introspect";
 import type { IntrospectionResult } from "./introspect";
 import {
@@ -120,6 +121,21 @@ const makeExecutor = () =>
     makeTestConfig({ plugins: [memoryCredentialsPlugin(), graphqlPlugin()] as const }),
   );
 
+const recordingBlobStore = () => {
+  const base = makeInMemoryBlobStore();
+  let writes = 0;
+  return {
+    store: {
+      ...base,
+      put: (namespace: string, key: string, value: string) =>
+        Effect.sync(() => {
+          writes += 1;
+        }).pipe(Effect.andThen(base.put(namespace, key, value))),
+    },
+    writeCount: () => writes,
+  };
+};
+
 const toolAddr = (integration: string, connection: string, tool: string): ToolAddress =>
   ToolAddress.make(`tools.${integration}.org.${connection}.${tool}`);
 
@@ -129,7 +145,7 @@ const createOrgConnection = (
     readonly integration: string;
     readonly name: string;
     readonly template: string;
-    readonly value: string;
+    readonly value?: string;
   },
 ) =>
   executor.connections.create({
@@ -137,10 +153,33 @@ const createOrgConnection = (
     name: ConnectionName.make(input.name),
     integration: IntegrationSlug.make(input.integration),
     template: AuthTemplateSlug.make(input.template),
-    value: input.value,
+    ...(input.value === undefined ? { values: {} } : { value: input.value }),
   });
 
 describe("graphqlPlugin real protocol server", () => {
+  it.effect("denies member schema persistence before writing an org blob", () =>
+    Effect.gen(function* () {
+      const blobs = recordingBlobStore();
+      const config = makeTestConfig({ plugins: [graphqlPlugin()] as const });
+      const member = yield* createExecutor({
+        ...config,
+        blobs: blobs.store,
+        orgWrites: "denied",
+      });
+
+      const error = yield* member.graphql
+        .addIntegration({
+          endpoint: "https://example.test/graphql",
+          slug: "denied-graphql",
+          introspectionJson,
+        })
+        .pipe(Effect.flip);
+
+      expect(error).toMatchObject({ _tag: "OrgWriteDeniedError" });
+      expect(blobs.writeCount()).toBe(0);
+    }),
+  );
+
   it("uses query-free endpoints for invocation attributes", () => {
     expect(endpointForTelemetry("https://api.example.test/graphql?token=secret#section")).toBe(
       "https://api.example.test/graphql",
@@ -311,7 +350,7 @@ describe("graphqlPlugin real protocol server", () => {
         integration: "live_graph",
         name: "default",
         template: "none",
-        value: "unused",
+        value: "",
       });
 
       yield* waitForRecordedRequests(server.requests, (requests) =>
@@ -322,6 +361,44 @@ describe("graphqlPlugin real protocol server", () => {
       expect(tools.map((tool) => String(tool.name))).toEqual(
         expect.arrayContaining(["query.hello", "mutation.setGreeting"]),
       );
+    }),
+  );
+
+  it.effect("rejects credential input for no-auth GraphQL and accepts an empty input map", () =>
+    Effect.gen(function* () {
+      const server = yield* serveGreetingServer;
+      const executor = yield* makeExecutor();
+      const integration = IntegrationSlug.make("no_auth_create");
+
+      yield* executor.graphql.addIntegration({
+        endpoint: server.endpoint,
+        slug: String(integration),
+      });
+
+      const error = yield* executor.connections
+        .create({
+          owner: "org",
+          name: ConnectionName.make("with-secret"),
+          integration,
+          template: AuthTemplateSlug.make("none"),
+          value: "must-not-be-stored",
+        })
+        .pipe(Effect.flip);
+      expect(error).toMatchObject({
+        _tag: "InvalidConnectionInputError",
+        message: "A no-auth connection cannot accept credential inputs.",
+      });
+      expect(yield* executor.connections.list({ integration })).toEqual([]);
+
+      const connection = yield* executor.connections.create({
+        owner: "org",
+        name: ConnectionName.make("public"),
+        integration,
+        template: AuthTemplateSlug.make("none"),
+        values: {},
+      });
+      expect(String(connection.address)).toBe("tools.no_auth_create.org.public");
+      expect(yield* executor.connections.list({ integration })).toHaveLength(1);
     }),
   );
 
@@ -356,7 +433,6 @@ describe("graphqlPlugin real protocol server", () => {
         integration: "guarded_graph",
         name: "default",
         template: "none",
-        value: "unused",
       });
 
       const tools = yield* executor.tools.list();
@@ -420,7 +496,6 @@ describe("graphqlPlugin real protocol server", () => {
         integration: "named_ops",
         name: "main",
         template: "none",
-        value: "unused",
       });
 
       yield* executor.execute(toolAddr("named_ops", "main", "query.hello"), { name: "Ada" });
@@ -462,7 +537,6 @@ describe("graphqlPlugin real protocol server", () => {
         integration: "http_error_graph",
         name: "main",
         template: "none",
-        value: "unused",
       });
 
       const result = yield* executor.execute(toolAddr("http_error_graph", "main", "query.hello"), {
@@ -508,7 +582,6 @@ describe("graphqlPlugin real protocol server", () => {
         integration: "auth_wall_graph",
         name: "main",
         template: "none",
-        value: "unused",
       });
 
       const result = yield* executor.execute(toolAddr("auth_wall_graph", "main", "query.hello"), {
@@ -551,7 +624,6 @@ describe("graphqlPlugin real protocol server", () => {
           integration: "scope_graph",
           name: "main",
           template: "none",
-          value: "unused",
         });
 
         const result = yield* executor.execute(toolAddr("scope_graph", "main", "query.hello"), {
@@ -600,7 +672,6 @@ describe("graphqlPlugin real protocol server", () => {
           integration: "scope_hdr_graph",
           name: "main",
           template: "none",
-          value: "unused",
         });
 
         const result = yield* executor.execute(toolAddr("scope_hdr_graph", "main", "query.hello"), {
@@ -701,6 +772,287 @@ describe("graphqlPlugin real protocol server", () => {
       expect(names).toContain("mutation.setGreeting");
     }),
   );
+
+  it.effect("validates an introspectable endpoint as healthy", () =>
+    Effect.gen(function* () {
+      const server = yield* serveGreetingServer;
+      const executor = yield* makeExecutor();
+      yield* executor.graphql.addIntegration({
+        endpoint: server.endpoint,
+        slug: "health_ok",
+      });
+      expect(
+        yield* executor.integrations.healthCheck.candidates(IntegrationSlug.make("health_ok")),
+      ).toEqual([
+        expect.objectContaining({
+          operation: "__schema",
+          destructive: false,
+        }),
+      ]);
+
+      const result = yield* executor.connections.validate({
+        owner: "org",
+        integration: IntegrationSlug.make("health_ok"),
+        template: AuthTemplateSlug.make("none"),
+        value: "unused",
+      });
+
+      expect(result).toMatchObject({
+        status: "healthy",
+        httpStatus: 200,
+        responseSample: [{ path: "__schema.queryType.name", value: "Query" }],
+      });
+      // The schema's root type name is not an account identity; reporting it
+      // as one made the accounts UI label every GraphQL connection
+      // "GraphQL schema: Query".
+      expect(result).not.toHaveProperty("identity");
+    }),
+  );
+
+  it.effect("rejects a credential blocked by an HTTP auth wall", () =>
+    Effect.gen(function* () {
+      const server = yield* serveGraphqlTestServer({
+        schema: makeGreetingGraphqlSchema(),
+        auth: {
+          validateAuthorization: (authorization) => Effect.succeed(authorization === "valid-token"),
+        },
+      });
+      const executor = yield* makeExecutor();
+      yield* executor.graphql.addIntegration({
+        endpoint: server.endpoint,
+        slug: "health_http_auth",
+        authenticationTemplate: [
+          {
+            slug: "header",
+            kind: "apikey",
+            placements: [{ carrier: "header", name: "Authorization", prefix: "" }],
+          },
+        ],
+      });
+
+      const result = yield* executor.connections.validate({
+        owner: "org",
+        integration: IntegrationSlug.make("health_http_auth"),
+        template: AuthTemplateSlug.make("header"),
+        value: "wrong-token",
+      });
+
+      expect(result.status).toBe("expired");
+      expect(result.httpStatus).toBe(401);
+      expect(result.detail).toContain("The endpoint rejected the credential with HTTP 401.");
+      expect(result.detail).toContain("Check the credential and selected authentication method.");
+      // A real non-2xx HTTP verdict is the one auth shape that claims
+      // `upstream_status`.
+      expect(result.reason).toBe("upstream_status");
+    }),
+  );
+
+  it.effect("classifies an authorization GraphQL error as an expired credential", () =>
+    Effect.gen(function* () {
+      const server = yield* serveTestHttpApp(() =>
+        Effect.succeed(
+          HttpServerResponse.jsonUnsafe({
+            errors: [{ message: "Unauthorized: invalid API key" }],
+          }),
+        ),
+      );
+      const executor = yield* makeExecutor();
+      yield* executor.graphql.addIntegration({
+        endpoint: server.url("/graphql"),
+        slug: "health_graphql_auth",
+      });
+
+      const result = yield* executor.connections.validate({
+        owner: "org",
+        integration: IntegrationSlug.make("health_graphql_auth"),
+        template: AuthTemplateSlug.make("none"),
+        value: "unused",
+      });
+
+      expect(result.status).toBe("expired");
+      expect(result.httpStatus).toBe(200);
+      expect(result.detail).toContain("The endpoint rejected the credential.");
+      expect(result.detail).toContain("Upstream said: Unauthorized: invalid API key");
+      // An auth rejection inside an HTTP 200 body has no non-2xx HTTP
+      // verdict, so it must NOT be labeled `upstream_status`.
+      expect(result.reason).toBeUndefined();
+    }),
+  );
+
+  it.effect("classifies a bare auth GraphQL error without auth keywords near a boundary", () =>
+    Effect.gen(function* () {
+      const server = yield* serveTestHttpApp(() =>
+        Effect.succeed(
+          HttpServerResponse.jsonUnsafe({
+            errors: [{ message: "Not authenticated" }],
+          }),
+        ),
+      );
+      const executor = yield* makeExecutor();
+      yield* executor.graphql.addIntegration({
+        endpoint: server.url("/graphql"),
+        slug: "health_bare_auth",
+      });
+
+      const result = yield* executor.connections.validate({
+        owner: "org",
+        integration: IntegrationSlug.make("health_bare_auth"),
+        template: AuthTemplateSlug.make("none"),
+        value: "unused",
+      });
+
+      expect(result.status).toBe("expired");
+      expect(result.detail).toContain("Upstream said: Not authenticated");
+    }),
+  );
+
+  it.effect("scrubs the probed credential value out of the health detail", () =>
+    Effect.gen(function* () {
+      const secret = "sk_live_scrub_me";
+      const server = yield* serveTestHttpApp(() =>
+        Effect.succeed(
+          HttpServerResponse.jsonUnsafe({ message: `Invalid API key ${secret}` }, { status: 401 }),
+        ),
+      );
+      const executor = yield* makeExecutor();
+      yield* executor.graphql.addIntegration({
+        endpoint: server.url("/graphql"),
+        slug: "health_scrub",
+        authenticationTemplate: [
+          {
+            slug: "header",
+            kind: "apikey",
+            placements: [{ carrier: "header", name: "Authorization", prefix: "" }],
+          },
+        ],
+      });
+
+      const result = yield* executor.connections.validate({
+        owner: "org",
+        integration: IntegrationSlug.make("health_scrub"),
+        template: AuthTemplateSlug.make("header"),
+        value: secret,
+      });
+
+      expect(result.status).toBe("expired");
+      expect(result.detail).not.toContain(secret);
+      expect(result.detail).toContain("[redacted]");
+    }),
+  );
+
+  it.effect("reports an invalid introspection response as degraded", () =>
+    Effect.gen(function* () {
+      const server = yield* serveTestHttpApp(() =>
+        Effect.succeed(HttpServerResponse.jsonUnsafe({ data: {} })),
+      );
+      const executor = yield* makeExecutor();
+      yield* executor.graphql.addIntegration({
+        endpoint: server.url("/graphql"),
+        slug: "health_invalid_shape",
+      });
+
+      const result = yield* executor.connections.validate({
+        owner: "org",
+        integration: IntegrationSlug.make("health_invalid_shape"),
+        template: AuthTemplateSlug.make("none"),
+        value: "unused",
+      });
+
+      expect(result).toMatchObject({
+        status: "degraded",
+        httpStatus: 200,
+        detail:
+          "The endpoint responded without a GraphQL introspection schema. Check that the URL points to a GraphQL endpoint and that introspection is enabled.",
+      });
+    }),
+  );
+
+  it.effect("reports an unparseable endpoint as a config problem, not a credential one", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeExecutor();
+      yield* executor.graphql.addIntegration({
+        endpoint: "not a url",
+        slug: "health_bad_endpoint",
+      });
+
+      const result = yield* executor.connections.validate({
+        owner: "org",
+        integration: IntegrationSlug.make("health_bad_endpoint"),
+        template: AuthTemplateSlug.make("none"),
+        value: "unused",
+      });
+
+      expect(result).toMatchObject({
+        status: "unknown",
+        detail:
+          "The GraphQL endpoint URL is invalid. Edit the integration configuration, then try again.",
+      });
+      // No request was ever sent, so nothing upstream judged the credential.
+      // Telling the operator to check it would send them down a dead end.
+      expect(result.detail).not.toContain("credential");
+    }),
+  );
+
+  it.effect("reports an endpoint with embedded userinfo as a config problem", () =>
+    Effect.gen(function* () {
+      const executor = yield* makeExecutor();
+      yield* executor.graphql.addIntegration({
+        endpoint: "https://svc:hunter2@graph.example.test/graphql",
+        slug: "health_userinfo_endpoint",
+      });
+
+      const result = yield* executor.connections.validate({
+        owner: "org",
+        integration: IntegrationSlug.make("health_userinfo_endpoint"),
+        template: AuthTemplateSlug.make("none"),
+        value: "unused",
+      });
+
+      expect(result).toMatchObject({
+        status: "unknown",
+        detail:
+          "The GraphQL endpoint URL is invalid. Edit the integration configuration, then try again.",
+      });
+      expect(result.detail).not.toContain("hunter2");
+    }),
+  );
+
+  it.effect("persists the introspection failure when tool sync is incomplete", () =>
+    Effect.gen(function* () {
+      const server = yield* serveTestHttpApp(() =>
+        Effect.succeed(
+          HttpServerResponse.jsonUnsafe({ message: "Bad credentials" }, { status: 401 }),
+        ),
+      );
+      const executor = yield* makeExecutor();
+      yield* executor.graphql.addIntegration({
+        endpoint: server.url("/graphql"),
+        slug: "incomplete_sync",
+      });
+      yield* createOrgConnection(executor, {
+        integration: "incomplete_sync",
+        name: "main",
+        template: "none",
+      });
+
+      const connection = yield* executor.connections.get({
+        owner: "org",
+        integration: IntegrationSlug.make("incomplete_sync"),
+        name: ConnectionName.make("main"),
+      });
+      expect(connection?.lastHealth).toMatchObject({
+        status: "degraded",
+        detail:
+          "Tool sync failing: The endpoint rejected the credential with HTTP 401. " +
+          "Check the credential and selected authentication method. Upstream said: Bad credentials",
+      });
+      expect(
+        (yield* executor.tools.list()).filter(
+          (tool) => String(tool.integration) === "incomplete_sync",
+        ),
+      ).toEqual([]);
+    }),
+  );
 });
 
 describe("graphqlPlugin", () => {
@@ -715,12 +1067,14 @@ describe("graphqlPlugin", () => {
       });
       expect(result.toolCount).toBe(2);
       expect(result.slug).toBe("test_api");
+      expect(
+        yield* executor.integrations.healthCheck.candidates(IntegrationSlug.make("test_api")),
+      ).toEqual([]);
 
       yield* createOrgConnection(executor, {
         integration: "test_api",
         name: "main",
         template: "none",
-        value: "unused",
       });
 
       const tools = yield* executor.tools.list();
@@ -760,7 +1114,6 @@ describe("graphqlPlugin", () => {
         integration: "removable",
         name: "main",
         template: "none",
-        value: "unused",
       });
 
       let tools = yield* executor.tools.list();
@@ -814,7 +1167,6 @@ describe("graphqlPlugin", () => {
         integration: "approval_test",
         name: "main",
         template: "none",
-        value: "unused",
       });
 
       const tools = yield* executor.tools.list();
@@ -1045,7 +1397,6 @@ describe("graphqlPlugin generates valid operations against rich schemas (#1146)"
         integration: slug,
         name: "main",
         template: "none",
-        value: "unused",
       });
       yield* server.clearRequests;
       return { server, executor };

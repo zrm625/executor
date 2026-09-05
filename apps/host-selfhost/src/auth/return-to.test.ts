@@ -1,6 +1,13 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import { isSafeReturnTo, loginPath, mcpAuthorizeResumeTarget, safeReturnTo } from "./return-to";
+import {
+  isSafeReturnTo,
+  loginPath,
+  loginErrorCallback,
+  mcpAuthorizeResumeTarget,
+  postLoginTarget,
+  safeReturnTo,
+} from "./return-to";
 
 describe("isSafeReturnTo", () => {
   const safe = [
@@ -73,6 +80,44 @@ describe("mcpAuthorizeResumeTarget", () => {
   });
 });
 
+describe("postLoginTarget", () => {
+  // Self-host renders the login page IN PLACE of the requested route without
+  // navigating, so the live location is the only record of where the person was
+  // headed. A connect deep link must survive sign-in on that basis alone.
+  it("returns to the deep link the person actually opened", () => {
+    expect(postLoginTarget({ pathname: "/connect/linear", search: "" })).toBe("/connect/linear");
+    expect(postLoginTarget({ pathname: "/integrations/sentry", search: "?addAccount=1" })).toBe(
+      "/integrations/sentry?addAccount=1",
+    );
+  });
+
+  it("lands on the dashboard when signing in from the bare login page", () => {
+    // No deep link to resume, and echoing /login back would re-render the form.
+    expect(postLoginTarget({ pathname: "/login", search: "" })).toBe("/");
+  });
+
+  it("prefers an explicit returnTo over the current location", () => {
+    expect(postLoginTarget({ pathname: "/login", search: "?returnTo=%2Fconnect%2Flinear" })).toBe(
+      "/connect/linear",
+    );
+  });
+
+  it("prefers an MCP authorize resume over everything else", () => {
+    const target = postLoginTarget({
+      pathname: "/login",
+      search:
+        "?response_type=code&client_id=abc&redirect_uri=http%3A%2F%2Flocalhost%3A3118%2Fcallback",
+    });
+    expect(target.startsWith("/api/auth/mcp/authorize?")).toBe(true);
+  });
+
+  it("never honors an unsafe location", () => {
+    // `safeReturnTo` vets the echoed path too — an app-plane path is not a
+    // place to land a freshly signed-in browser.
+    expect(postLoginTarget({ pathname: "/api/auth/logout", search: "" })).toBe("/");
+  });
+});
+
 describe("loginPath", () => {
   it("omits returnTo for the root", () => {
     expect(loginPath("/")).toBe("/login");
@@ -82,5 +127,22 @@ describe("loginPath", () => {
     expect(loginPath("/api/oauth/callback?state=oauth-state&code=provider-code")).toBe(
       "/login?returnTo=%2Fapi%2Foauth%2Fcallback%3Fstate%3Doauth-state%26code%3Dprovider-code",
     );
+  });
+});
+
+describe("loginErrorCallback", () => {
+  it("retains MCP authorization parameters across repeated provider failures", () => {
+    const request =
+      "?response_type=code&client_id=abc&redirect_uri=http%3A%2F%2Flocalhost%2Fcallback&state=client-state&code_challenge=pkce&code_challenge_method=S256&scope=openid";
+    const target = postLoginTarget({ pathname: "/login", search: request });
+    const first = new URL(loginErrorCallback(target), "https://executor.example.test");
+    const resumed = postLoginTarget(first);
+    const second = new URL(loginErrorCallback(resumed), first.origin);
+    const actual = new URL(postLoginTarget(second), first.origin);
+    expect(actual.pathname).toBe("/api/auth/mcp/authorize");
+    for (const [key, value] of new URLSearchParams(request)) {
+      expect(actual.searchParams.get(key)).toBe(value);
+    }
+    expect(safeReturnTo("/api/auth/mcp/authorize?response_type=code")).toBeNull();
   });
 });

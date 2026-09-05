@@ -5,6 +5,9 @@ import {
   createExecutorMcpServer,
 } from "@executor-js/host-mcp/tool-server";
 import { buildResumeApprovalUrl } from "@executor-js/host-mcp/browser-approval";
+import { artifactUrlFor } from "@executor-js/host-mcp/create-artifact";
+import { makeAssetsShellHtmlLoader } from "@executor-js/mcp-apps-shell/worker";
+import { smokeRenderArtifact } from "@executor-js/mcp-apps-shell/smoke-render";
 import type { ExecutorDbHandle } from "@executor-js/api/server";
 import {
   McpAgentSessionDOBase,
@@ -14,6 +17,7 @@ import {
   type McpSessionInit,
   type SessionMeta,
 } from "@executor-js/cloudflare/mcp/agent-durable-object";
+import { sessionOrgRoleMetadata } from "@executor-js/cloudflare/mcp/role-metadata";
 import {
   mcpExecutionOwnerDirectoryFromNamespace,
   type McpExecutionOwnerDirectory,
@@ -54,6 +58,14 @@ class McpModelResumeForwardError extends Data.TaggedError("McpModelResumeForward
 export class McpSessionDO extends McpAgentSessionDOBase<CloudflareEnv, CfSessionDbHandle> {
   private readonly cfEnv: CloudflareEnv;
   private readonly cfConfig: CloudflareConfig;
+  /**
+   * The `ui://executor/shell.html` document, over the ASSETS binding: a
+   * deployed Worker has no filesystem, so the shell is the stable-named asset
+   * the SPA build emitted into `./dist` (`mcpAppsShellAsset`). No dev-mode
+   * escape hatch here, unlike cloud: this Worker is bundled by wrangler, not
+   * Vite, and `wrangler dev` serves the same built `./dist` the binding reads.
+   */
+  private readonly loadAppShellHtml: () => Promise<string>;
 
   constructor(
     ctx: ConstructorParameters<typeof McpAgentSessionDOBase<CloudflareEnv, CfSessionDbHandle>>[0],
@@ -62,10 +74,23 @@ export class McpSessionDO extends McpAgentSessionDOBase<CloudflareEnv, CfSession
     super(ctx, env);
     this.cfEnv = env;
     this.cfConfig = loadConfig(env);
+    this.loadAppShellHtml = makeAssetsShellHtmlLoader({ assets: env.ASSETS });
   }
 
   protected override executionOwnerDirectory(): McpExecutionOwnerDirectory | null {
     return mcpExecutionOwnerDirectoryFromNamespace(this.cfEnv.MCP_EXECUTION_OWNER);
+  }
+
+  protected override supportsCapEviction(): boolean {
+    return true;
+  }
+
+  protected override requestSelfEviction(): Promise<void> {
+    // Routed through this session's OWN stub (never a direct in-process call)
+    // so `requestCapEviction`'s teardown runs under an IoContext scoped to
+    // this request, not whatever request happened to trigger the eviction
+    // check — see the base class's `requestSelfEviction` doc comment.
+    return mcpSessionStub(this.cfEnv.MCP_SESSION, this.sessionId).requestCapEviction();
   }
 
   protected override forwardModelResumeToOwner(
@@ -90,16 +115,24 @@ export class McpSessionDO extends McpAgentSessionDOBase<CloudflareEnv, CfSession
     return { ...handle, end: () => handle.close() };
   }
 
-  protected override resolveSessionMeta(token: McpSessionInit): Effect.Effect<SessionMeta> {
+  protected override resolveSessionMeta(
+    token: McpSessionInit,
+    _storedMeta: SessionMeta | null,
+  ): Effect.Effect<SessionMeta> {
     // Single-tenant: every Access principal belongs to the one configured org,
-    // so there is nothing to resolve — stamp the configured org name.
+    // so there is nothing to resolve — stamp the configured org name. Nothing
+    // to reuse from the stored meta either; config is already the cheapest and
+    // freshest source there is.
     return Effect.succeed({
       organizationId: token.organizationId,
       organizationName: this.cfConfig.organizationName,
       organizationSlug: this.cfConfig.organizationSlug,
+      ...sessionOrgRoleMetadata(token),
       userId: token.userId,
       resource: token.resource,
       elicitationMode: token.elicitationMode,
+      artifactsEnabled: token.artifactsEnabled,
+      searchToolsEnabled: token.searchToolsEnabled,
     } satisfies SessionMeta);
   }
 
@@ -113,19 +146,41 @@ export class McpSessionDO extends McpAgentSessionDOBase<CloudflareEnv, CfSession
       // QuickJS-WASM must be loaded before the executor layer builds it (the
       // default variant can't fetch its .wasm on Workers). Idempotent per isolate.
       yield* Effect.promise(() => preloadQuickJs());
-      const { engine } = yield* makeExecutionStack(
+      const { engine, executor } = yield* makeExecutionStack(
         sessionMeta.userId,
         sessionMeta.organizationId,
         sessionMeta.organizationName,
-        { mcpResource: sessionMeta.resource },
+        { mcpResource: sessionMeta.resource, orgWrites: "request" },
       ).pipe(Effect.provide(makeCloudflareExecutionStackLayer(config, dbHandle)));
       // Browser elicitation mode (the base owns the approval store + the HTTP
       // approval RPCs): a gated execution pauses and returns an approvalUrl into
       // the console resume page. The URL origin is the create request's origin
       // (captured by the base), falling back to the configured site URL.
       const elicitationMode = sessionMeta.elicitationMode ?? "model";
+      // Same origin story as the approval URL below: an artifact deep link is
+      // only offered when this deployment knows its own public URL. Without one
+      // the artifact is still saved, and the tool says so.
+      const artifactOrigin = sessionMeta.webOrigin ?? config.webBaseUrl;
       const mcpServer = yield* createExecutorMcpServer({
         engine,
+        artifacts: executor.artifacts,
+        connections: executor.connections,
+        // Artifacts are on by default, opt-out per connection. A session
+        // persisted without a value restores to the default, same as a fresh
+        // connection whose URL says nothing about `?artifacts=`.
+        artifactsEnabled: sessionMeta.artifactsEnabled ?? true,
+        // Per-integration search tools are off by default, opt-in per
+        // connection (`?search_tools=true`). Same restore rule as artifacts.
+        searchToolsEnabled: sessionMeta.searchToolsEnabled ?? false,
+        // Cold restores rebuild this server with no `initialize` to replay, so
+        // the negotiated apps support comes back from storage instead.
+        restoredAppsEnabled: sessionMeta.appsEnabled ?? false,
+        onAppsEnabledChange: (appsEnabled) => self.persistAppsEnabled(appsEnabled),
+        loadAppShellHtml: self.loadAppShellHtml,
+        smokeRenderArtifact,
+        ...(artifactOrigin
+          ? { artifactUrl: artifactUrlFor(artifactOrigin, sessionMeta.organizationSlug) }
+          : {}),
         browserApprovalStore: self.browserApprovalStore,
         pausedExecutionHooks: self.pausedExecutionHooks,
         pausedExecutionLeaseMs: PAUSED_APPROVAL_TIMEOUT_MS,

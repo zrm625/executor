@@ -38,12 +38,14 @@ import { WorkOSClient } from "./workos";
 export const resolveOrganization = (organizationId: string) =>
   Effect.gen(function* () {
     const users = yield* UserStoreService;
-    const existing = yield* users.use((s) => s.getOrganization(organizationId));
+    const existing = yield* users.use("getOrganization", (s) => s.getOrganization(organizationId));
     if (existing) return existing;
 
     const workos = yield* WorkOSClient;
     const fresh = yield* workos.getOrganization(organizationId);
-    return yield* users.use((s) => s.upsertOrganization({ id: fresh.id, name: fresh.name }));
+    return yield* users.use("upsertOrganization", (s) =>
+      s.upsertOrganization({ id: fresh.id, name: fresh.name }),
+    );
   });
 
 // ---------------------------------------------------------------------------
@@ -86,7 +88,14 @@ export const authorizeOrganization = (userId: string, organizationId: string) =>
     );
     if (!active) return null;
 
-    return yield* resolveOrganization(organizationId);
+    const org = yield* resolveOrganization(organizationId);
+    // The membership row already names the caller's role — surface it
+    // normalized so identity resolution can bind the executor's workspace
+    // write permission without a second WorkOS call. WorkOS issues
+    // `admin` / `member`; anything unrecognized stays a plain member.
+    const roleSlug = (active as { readonly role?: { readonly slug?: string } }).role?.slug;
+    const memberRole: "admin" | "member" = roleSlug === "admin" ? "admin" : "member";
+    return { ...org, memberRole };
   });
 
 // ---------------------------------------------------------------------------
@@ -125,7 +134,7 @@ export const authorizeOrganizationSelector = (userId: string, selector: string) 
       return yield* authorizeOrganization(userId, selector);
     }
     const users = yield* UserStoreService;
-    const org = yield* users.use((s) => s.getOrganizationBySlug(selector));
+    const org = yield* users.use("getOrganizationBySlug", (s) => s.getOrganizationBySlug(selector));
     if (!org) return null;
     return yield* authorizeOrganization(userId, org.id);
   });

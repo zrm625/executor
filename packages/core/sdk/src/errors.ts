@@ -2,7 +2,14 @@ import { Schema } from "effect";
 
 import { ElicitationDeclinedError } from "./elicitation";
 import type { StorageFailure } from "./fuma-runtime";
-import { ConnectionName, IntegrationSlug, Owner, ProviderKey, ToolAddress } from "./ids";
+import {
+  ArtifactId,
+  ConnectionName,
+  IntegrationSlug,
+  Owner,
+  ProviderKey,
+  ToolAddress,
+} from "./ids";
 
 export interface UserActionableError {
   readonly __executorUserActionable: true;
@@ -25,7 +32,8 @@ export const isUserActionableError = (value: unknown): value is UserActionableEr
 /* The failure set the SDK surfaces. `execute`'s invoke failures are ported from
  * v1 but re-keyed by `address` (the full `tools.<integration>.<owner>.<connection>.<tool>`
  * handle) instead of an opaque tool id. Storage failures reuse fuma-runtime's
- * `StorageError`/`UniqueViolationError` (`StorageFailure`) — not redefined here. */
+ * `StorageError`/`StorageConnectionError`/`UniqueViolationError`
+ * (`StorageFailure`) — not redefined here. */
 
 // ---------------------------------------------------------------------------
 // Tool lifecycle
@@ -43,10 +51,16 @@ export class ToolNotFoundError extends Schema.TaggedErrorClass<ToolNotFoundError
   {
     address: ToolAddress,
     suggestions: Schema.optional(Schema.Array(ToolAddress)),
+    /** Why the address did not resolve, when something more useful than the
+     *  address is known — a connection that produced no tools, say. Optional:
+     *  an ordinary unknown tool name has nothing to add. */
+    reason: Schema.optional(Schema.String),
   },
 ) {
   override get message(): string {
-    return `Tool not found: ${this.address}`;
+    return this.reason === undefined
+      ? `Tool not found: ${this.address}`
+      : `Tool not found: ${this.address} — ${this.reason}`;
   }
 }
 
@@ -135,6 +149,32 @@ export class IntegrationRemovalNotAllowedError extends Schema.TaggedErrorClass<I
   }
 }
 
+/** A connection create or workspace-level mutation (an `owner: "org"` row, or
+ *  the tenant-shared integration catalog) was attempted on an executor bound
+ *  with `orgWrites: "denied"` — a member who may USE workspace resources but
+ *  not configure them. Reads, tool execution, and operational writes (token
+ *  refresh, catalog re-sync) are unaffected; only the user-intent settings
+ *  surfaces raise this. */
+export class OrgWriteDeniedError
+  extends Schema.TaggedErrorClass<OrgWriteDeniedError>()(
+    "OrgWriteDeniedError",
+    {},
+    { httpApiStatus: 403 },
+  )
+  implements UserActionableError
+{
+  readonly __executorUserActionable = true;
+  readonly code = "org_write_denied";
+
+  override get message(): string {
+    return "Adding connections or changing workspace settings requires a workspace admin.";
+  }
+
+  get userMessage(): string {
+    return this.message;
+  }
+}
+
 export class ConnectionNotFoundError extends Schema.TaggedErrorClass<ConnectionNotFoundError>()(
   "ConnectionNotFoundError",
   {
@@ -145,6 +185,26 @@ export class ConnectionNotFoundError extends Schema.TaggedErrorClass<ConnectionN
 ) {
   override get message(): string {
     return `Connection not found: ${this.integration}.${this.owner}.${this.name}`;
+  }
+}
+
+/** `connections.create` targeted a (owner, integration, name) that already has
+ *  a saved connection. Creating is never a replace: a silent upsert would
+ *  clobber the existing credential reference (and, for pasted values, the
+ *  stored secret itself). Rotate a credential by removing and re-adding the
+ *  connection, or pick a different name. OAuth re-connects go through
+ *  `mintOAuthConnection`, which intentionally re-stamps the same row. */
+export class ConnectionAlreadyExistsError extends Schema.TaggedErrorClass<ConnectionAlreadyExistsError>()(
+  "ConnectionAlreadyExistsError",
+  {
+    owner: Owner,
+    integration: IntegrationSlug,
+    name: ConnectionName,
+  },
+  { httpApiStatus: 409 },
+) {
+  override get message(): string {
+    return `A connection named "${this.name}" already exists for ${this.integration} (${this.owner}). Choose a different name, or remove the existing connection first.`;
   }
 }
 
@@ -181,8 +241,43 @@ export class CredentialResolutionError extends Schema.TaggedErrorClass<Credentia
     /** True when the stored grant is permanently invalid and the user must
      *  sign in again (RFC 6749 §5.2 invalid_grant and friends). */
     reauthRequired: Schema.optional(Schema.Boolean),
+    /** The authorization server's RFC 6749 §5.2 error code (`invalid_grant`,
+     *  `invalid_client`, …), when the failure came from a token-endpoint
+     *  refusal. A typed field rather than message text so telemetry and
+     *  classification read it structurally — the misclassification where
+     *  `invalid_client` (rotated app secret, fleet-wide) surfaced as a vague
+     *  "degraded" was only findable by grepping persisted message strings. */
+    oauthErrorCode: Schema.optional(Schema.String),
+    /** True when an enterprise identity provider declined to authorize this
+     *  connection under administrator policy. Distinct from `reauthRequired`
+     *  because signing in again cannot help, and — critically — the client must
+     *  NOT offer the ordinary per-server OAuth flow as an alternative route:
+     *  that would let the user walk around the policy the IdP just enforced. */
+    blockedByAdmin: Schema.optional(Schema.Boolean),
+    /** True when the failure is that no usable credential material EXISTS on
+     *  our side (no stored refresh token, an unresolvable provider item, a
+     *  deregistered OAuth client) — nothing was sent upstream and no
+     *  authorization server refused anything. Structural, so health telemetry
+     *  can separate "missing material" from "refresh rejected" without
+     *  reading the message. */
+    credentialMissing: Schema.optional(Schema.Boolean),
   },
 ) {}
+
+// ---------------------------------------------------------------------------
+// Artifacts
+// ---------------------------------------------------------------------------
+
+/** No artifact with this id is visible to the bound owner scope — it was never
+ *  saved, was deleted, or belongs to another subject. */
+export class ArtifactNotFoundError extends Schema.TaggedErrorClass<ArtifactNotFoundError>()(
+  "ArtifactNotFoundError",
+  { id: ArtifactId },
+) {
+  override get message(): string {
+    return `Artifact not found: ${this.id}`;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Union — the failure channel of `execute`.
@@ -204,4 +299,5 @@ export type ExecuteError =
 export type ExecutorError =
   | ExecuteError
   | IntegrationNotFoundError
-  | IntegrationRemovalNotAllowedError;
+  | IntegrationRemovalNotAllowedError
+  | ArtifactNotFoundError;

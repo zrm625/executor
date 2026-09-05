@@ -3,7 +3,10 @@ export {
   checkForUpdate,
   resolveDistTags,
   resolveUpdateChannel,
+  resolveComparisonChannel,
   compareVersions,
+  isUnstampedVersion,
+  isUpdateAvailable,
   EXECUTOR_PACKAGE_NAME,
   type UpdateStatus,
   type UpdateChannel,
@@ -34,6 +37,7 @@ export {
   type RunOAuthCallbackInput,
 } from "./oauth-popup";
 export { PoliciesApi } from "./policies/api";
+export { ArtifactsApi } from "./artifacts/api";
 export {
   AccountApi,
   AccountHttpApi,
@@ -46,6 +50,7 @@ export {
   AccountMeResponse,
   ApiKeySummary,
   ApiKeysResponse,
+  OrgApiKeysResponse,
   CreateApiKeyBody,
   CreatedApiKeyResponse,
   OrgMember,
@@ -60,6 +65,21 @@ export {
   UpdateOrgNameResponse,
   SuccessResponse,
 } from "./account/api";
+export {
+  AdminUsersApi,
+  AdminUsersHttpApi,
+  AdminUsersError,
+  AdminUsersForbidden,
+  AdminUsersUnauthorized,
+  AdminUserNotFound,
+  AdminUser,
+  AdminUserConnection,
+  AdminUserWithConnections,
+  AdminUserResponse,
+  AdminUsersResponse,
+  AdminUserConnectionsResponse,
+  AdminUsersWithConnectionsResponse,
+} from "./admin/api";
 export {
   RESERVED_ORG_SLUGS,
   generateOrgSlug,

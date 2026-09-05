@@ -1,7 +1,8 @@
 // Selfhost (browser): a registered OAuth app is managed entirely from the
 // Add-connection modal — there is no separate "OAuth apps" page. The user
-// registers a bring-your-own app for an integration, edits its stored client
-// id, and removes it, all from the OAuth app picker inside the modal.
+// registers a bring-your-own app for an integration, selects and persists its
+// token-endpoint client authentication, edits its stored client id, and removes
+// it, all from the OAuth app picker inside the modal.
 //
 // The integration only needs to DECLARE an OAuth method for the picker to show;
 // registering/editing/removing an app touches stored credentials only and never
@@ -16,6 +17,7 @@ import { openApiHttpPlugin } from "@executor-js/plugin-openapi/api";
 
 import { scenario } from "../src/scenario";
 import { Api, Browser, Target } from "../src/services";
+import { visit } from "../src/surfaces/browser";
 
 const api = composePluginApi([openApiHttpPlugin()] as const);
 
@@ -81,7 +83,7 @@ scenario(
           const actions = page.getByRole("button", { name: `Actions for ${appName}` });
 
           await step("Open the integration and start a new connection", async () => {
-            await page.goto(`/integrations/${integration}`, { waitUntil: "networkidle" });
+            await visit(page, `/integrations/${integration}`);
             await page.getByRole("button", { name: "Add connection" }).click();
             // OAuth2 is the integration's only method, so the modal opens on
             // the OAuth app step with nothing registered yet. (`exact` avoids
@@ -94,6 +96,7 @@ scenario(
             await page.locator("#oauth-app-name").fill(appName);
             await page.locator("#oauth-client-id").fill("client-one");
             await page.locator("#oauth-client-secret").fill("secret-one");
+            await page.getByRole("radio", { name: /^HTTP Basic client_secret_basic$/ }).check();
             await page.getByRole("button", { name: "Register app", exact: true }).click();
             // Back on the picker, the new app is selectable AND manageable —
             // the per-app actions menu is what replaced the old apps page.
@@ -108,6 +111,11 @@ scenario(
               await page.locator("#oauth-client-id").inputValue(),
               "the edit form prefills the stored client id",
             ).toBe("client-one");
+            await expect
+              .poll(() =>
+                page.getByRole("radio", { name: /^HTTP Basic client_secret_basic$/ }).isChecked(),
+              )
+              .toBe(true);
           });
 
           await step("Change the client id and save the edit", async () => {
@@ -127,6 +135,33 @@ scenario(
             ).toBe("client-two");
             await page.getByRole("button", { name: "Cancel" }).click();
             await actions.waitFor();
+          });
+
+          await step("A rejected removal reports the failure and keeps the app", async () => {
+            await page.route("**/api/oauth/clients/**", async (route) => {
+              if (route.request().method() !== "DELETE") {
+                await route.continue();
+                return;
+              }
+              await route.fulfill({
+                status: 500,
+                contentType: "application/json",
+                body: JSON.stringify({ _tag: "InternalError", traceId: "oauth-client-remove" }),
+              });
+            });
+            await actions.click();
+            await page.getByRole("menuitem", { name: "Remove" }).click();
+            await page.getByRole("button", { name: "Remove app" }).click();
+            await page.getByText(`Failed to remove ${appName}`, { exact: true }).waitFor();
+            await page.getByRole("heading", { name: `Remove ${appName}?` }).waitFor();
+            const clients = await Effect.runPromise(client.oauth.listClients());
+            expect(
+              clients.map((candidate) => String(candidate.slug)),
+              "a rejected removal leaves the registered app in the catalog",
+            ).toContain(appName);
+            await page.getByRole("button", { name: "Cancel" }).click();
+            await actions.waitFor();
+            await page.unroute("**/api/oauth/clients/**");
           });
 
           await step("Remove the app and confirm", async () => {

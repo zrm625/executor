@@ -1,14 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
-import { useAtomValue, useAtomSet } from "@effect/atom-react";
+import { useAtomValue, useAtomRefresh, useAtomSet } from "@effect/atom-react";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import * as Exit from "effect/Exit";
-import { IntegrationSlug, type Connection, type Owner } from "@executor-js/sdk/shared";
+import {
+  IntegrationSlug,
+  type Connection,
+  type OAuthClientSummary,
+  type Owner,
+} from "@executor-js/sdk/shared";
 import type { IntegrationAccountHandoff } from "@executor-js/sdk/client";
 import { toast } from "sonner";
 
 import {
   addConnectionOptimistic,
   connectionsForIntegrationAtom,
+  oauthClientsOptimisticAtom,
   refreshConnection,
   removeConnectionOptimistic,
   startOAuth,
@@ -19,17 +25,32 @@ import { useConnectionHealth } from "../lib/use-connection-health";
 import { messageFromExit } from "../api/error-reporting";
 import { ownerLabel, useOwnerDisplay } from "../api/owner-display";
 import { trackEvent } from "../api/analytics";
+import { useCanCreateWorkspaceConnections } from "../multiplayer/use-admin-nav";
 import type { AuthMethod } from "../lib/auth-placements";
 import {
   connectionNeedsReconsent,
   oauthReconnectPayload,
+  reconnectClientsView,
   reconnectMode,
+  reconnectRoute,
   reconsentRequiredScopes,
+  retryReconnectClientsOnMenuOpen,
 } from "../plugins/oauth-reconnect";
 import { useOAuthPopupFlow } from "../plugins/oauth-sign-in";
-import { AddAccountModal } from "./add-account-modal";
+import { canManageConnectionForAccess } from "../plugins/connection-owner";
+import { AddAccountModal, hasDcr } from "./add-account-modal";
 import { ConnectionEditSheet } from "./metadata-edit-sheet";
 import type { CreateCustomMethod } from "./add-custom-method-modal";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "./alert-dialog";
 import { Badge } from "./badge";
 import { Button } from "./button";
 import {
@@ -60,14 +81,68 @@ import {
 
 const OWNERS: readonly Owner[] = ["org", "user"];
 
+/** Render a health-check detail with any bare https URL as a clickable link.
+ *  Exists for the misconfigured verdict, whose detail is the provider's own
+ *  remediation text (Google's includes the console URL that enables the
+ *  disabled API); the rest of the string stays plain text. */
+function DetailWithLinks(props: { readonly text: string }) {
+  const parts = props.text.split(/(https:\/\/[^\s,;)]+)/g);
+  return (
+    <>
+      {parts.map((part, index) =>
+        part.startsWith("https://") ? (
+          <a
+            // Stable for a given detail string: parts are positional.
+            // oxlint-disable-next-line react/no-array-index-key
+            key={index}
+            href={part}
+            target="_blank"
+            rel="noreferrer"
+            className="underline underline-offset-2 hover:text-foreground"
+          >
+            {part}
+          </a>
+        ) : (
+          part
+        ),
+      )}
+    </>
+  );
+}
+
+// The confirm dialog names the connection the way the row does — stored
+// identity label first, connection name otherwise. (No live probe identity
+// here; that state lives inside the row.)
+const connectionDisplayLabel = (connection: Connection | null): string => {
+  if (connection === null) return "connection";
+  return connection.identityLabel && connection.identityLabel.length > 0
+    ? connection.identityLabel
+    : String(connection.name);
+};
+
 function AccountRow(props: {
   readonly connection: Connection;
   /** The integration declares scopes this connection was not granted — it must
    *  reconnect to grant the newly-needed access (e.g. after a service was added). */
   readonly needsReconsent: boolean;
   readonly showOwnerLabel: boolean;
+  readonly canManage: boolean;
+  readonly canReconnect: boolean;
   readonly onEdit: () => void;
   readonly onReconnect: () => void;
+  /** Reconnect routing needs the stored client binding; while the client
+   *  summaries carry no data the route is unknown, so the action is
+   *  disabled rather than guessed (same idiom as "Check now" above). */
+  readonly reconnectDisabled: boolean;
+  /** The summaries query failed: the Reconnect item stays disabled but says
+   *  so (never a silently dead action). Retained stale data never routes — a
+   *  binding changed since the snapshot could misroute. Opening the menu
+   *  retries the query via `onMenuOpenChange`, so the hint reflects a retry
+   *  that just failed, not a permanently stuck state. */
+  readonly reconnectFailed: boolean;
+  /** Forwarded to the row menu; the owner uses the OPEN transition to retry
+   *  a failed client-summaries query. */
+  readonly onMenuOpenChange: (open: boolean) => void;
   readonly onRemove: () => void;
 }) {
   const { connection, needsReconsent } = props;
@@ -95,6 +170,12 @@ function AccountRow(props: {
   const displayLabel = identity ?? String(connection.name);
 
   const expired = status === "expired";
+  // `misconfigured` is deliberately NOT folded into `needsHealthAttention`: it
+  // gets its own amber "API disabled" badge and its own link-rendered detail
+  // below, because the remediation is a console visit, not a reconnect.
+  const misconfigured = status === "misconfigured";
+  const needsHealthAttention = status === "expired" || status === "degraded";
+  const healthDetail = needsHealthAttention ? probe?.detail : undefined;
   const missingOAuthScopes = connection.missingOAuthScopes ?? [];
 
   const handleCheck = async () => {
@@ -113,6 +194,13 @@ function AccountRow(props: {
       );
     } else if (exit.value.status === "expired") {
       toast.error("Connection expired, reconnect to restore access");
+    } else if (exit.value.status === "misconfigured") {
+      // NOT a reconnect prompt: the credential is fine; the upstream API is
+      // disabled where the OAuth client lives. The detail carries the
+      // provider's own instruction (with a console link for Google).
+      toast.warning(
+        exit.value.detail ?? "An upstream API is disabled for this connection's OAuth client",
+      );
     } else if (exit.value.status === "degraded") {
       toast.warning(exit.value.detail ?? "Connection check returned an error");
     } else {
@@ -130,9 +218,17 @@ function AccountRow(props: {
             className={`size-2 shrink-0 rounded-full ${indicator.dot}`}
           />
           <span className="truncate">{displayLabel}</span>
-          {expired ? (
-            <Badge variant="destructive" className="shrink-0">
-              Expired
+          {needsHealthAttention ? (
+            <Badge variant={expired ? "destructive" : "outline"} className="shrink-0">
+              {HEALTH_STATUS_LABEL[status]}
+            </Badge>
+          ) : null}
+          {misconfigured ? (
+            <Badge
+              variant="outline"
+              className="shrink-0 border-amber-600/40 text-amber-600 dark:text-amber-500"
+            >
+              API disabled
             </Badge>
           ) : null}
           {needsReconsent ? (
@@ -144,6 +240,20 @@ function AccountRow(props: {
         {connection.description && connection.description.length > 0 ? (
           <CardStackEntryDescription className="mt-1 text-xs">
             {connection.description}
+          </CardStackEntryDescription>
+        ) : null}
+        {misconfigured && probe?.detail ? (
+          // Not CardStackEntryDescription: that truncates to one line, and this
+          // text IS the remediation (the enable-API console link must stay
+          // visible in full). Wrap instead; break anywhere so the long URL
+          // cannot overflow the row.
+          <p className="mt-1 whitespace-normal text-xs text-muted-foreground [overflow-wrap:anywhere]">
+            <DetailWithLinks text={probe.detail} />
+          </p>
+        ) : null}
+        {healthDetail ? (
+          <CardStackEntryDescription className="mt-1 overflow-visible whitespace-normal text-clip text-xs text-muted-foreground">
+            {healthDetail}
           </CardStackEntryDescription>
         ) : null}
         {needsReconsent ? (
@@ -161,7 +271,7 @@ function AccountRow(props: {
         {props.showOwnerLabel ? (
           <Badge variant="outline">{ownerLabel(connection.owner)}</Badge>
         ) : null}
-        <DropdownMenu>
+        <DropdownMenu onOpenChange={props.onMenuOpenChange}>
           <DropdownMenuTrigger asChild>
             <Button
               variant="ghost"
@@ -183,15 +293,30 @@ function AccountRow(props: {
             >
               {checking ? "Checking…" : "Check now"}
             </DropdownMenuItem>
-            <DropdownMenuItem className="text-sm" onClick={props.onEdit}>
-              Edit
-            </DropdownMenuItem>
-            <DropdownMenuItem className="text-sm" onClick={props.onReconnect}>
-              Reconnect
-            </DropdownMenuItem>
-            <DropdownMenuItem variant="destructive" className="text-sm" onClick={props.onRemove}>
-              Remove
-            </DropdownMenuItem>
+            {props.canManage ? (
+              <DropdownMenuItem className="text-sm" onClick={props.onEdit}>
+                Edit
+              </DropdownMenuItem>
+            ) : null}
+            {props.canReconnect ? (
+              <DropdownMenuItem
+                className="text-sm"
+                disabled={props.reconnectDisabled}
+                onClick={props.onReconnect}
+              >
+                Reconnect
+                {props.reconnectFailed ? (
+                  // Same failed-query voice as the modal's picker errors; the
+                  // trailing placement mirrors DropdownMenuShortcut.
+                  <span className="ml-auto text-xs text-destructive">Failed to load</span>
+                ) : null}
+              </DropdownMenuItem>
+            ) : null}
+            {props.canManage ? (
+              <DropdownMenuItem variant="destructive" className="text-sm" onClick={props.onRemove}>
+                Remove
+              </DropdownMenuItem>
+            ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
       </CardStackEntryActions>
@@ -199,19 +324,45 @@ function AccountRow(props: {
   );
 }
 
+export const canReconnectConnectionForAccess = (
+  canManageConnections: boolean,
+  _mode: "oauth" | "refresh",
+): boolean => canManageConnections;
+
 function OwnerAccounts(props: {
   readonly integration: IntegrationSlug;
   readonly owner: Owner;
   readonly showOwnerLabels: boolean;
+  readonly canManageConnections: boolean;
   readonly methods: readonly AuthMethod[];
   readonly onEdit: (connection: Connection) => void;
-  readonly onDcrReconnect: (connection: Connection) => void;
+  /** Hand the connection to the modal's automatic reconnect flow. Only called
+   *  once the stored binding was vetted as auto-minted DCR (or gone);
+   *  `storedClient` is that binding's summary — undefined when the row is
+   *  gone — so the handoff can carry its resource. */
+  readonly onDcrReconnect: (
+    connection: Connection,
+    storedClient: OAuthClientSummary | undefined,
+  ) => void;
   /** The integration's declared oauth scopes — compared against each connection's
    *  granted `oauthScope` to flag connections that must reconnect for new access. */
   readonly declaredScopes: readonly string[] | undefined;
 }) {
   const { integration, owner } = props;
   const connections = useAtomValue(connectionsForIntegrationAtom({ integration, owner }));
+  // Registered-app summaries: the Reconnect routing below inspects the STORED
+  // client binding (its origin kind and resource), not just the method's
+  // capability, before sending a connection into the automatic flow. Routing
+  // only ever reads a current successful load — never stale data — and a
+  // failed query marks the action failed (recoverable — opening the row menu
+  // retries the query).
+  const allClients = useAtomValue(oauthClientsOptimisticAtom);
+  const refreshClients = useAtomRefresh(oauthClientsOptimisticAtom);
+  const clientsView = reconnectClientsView(allClients);
+  // Removal confirms in a dialog. State lives here (not in the row) because the
+  // Remove menu item closes its dropdown on click, which would unmount a dialog
+  // nested inside it — so the row only nominates the connection to remove.
+  const [removingConnection, setRemovingConnection] = useState<Connection | null>(null);
   const doRemove = useAtomSet(removeConnectionOptimistic(owner), {
     mode: "promiseExit",
   });
@@ -239,15 +390,35 @@ function OwnerAccounts(props: {
         (candidate: AuthMethod) =>
           candidate.kind === "oauth" && String(candidate.template) === String(connection.template),
       );
-      if (
-        method?.oauth?.supportsDynamicRegistration === true ||
-        method?.oauth?.discoveryUrl != null
-      ) {
-        props.onDcrReconnect(connection);
+      // Route by the STORED binding's origin (`reconnectRoute`): an
+      // auto-minted DCR binding re-runs the automatic probe/registration flow
+      // (direct reuse dead-ends once the callback origin drifts, #1542); a
+      // static/BYO or first-party binding takes the direct path below even on
+      // a discovery-capable integration — re-registering would silently
+      // rebind the connection to an automatic client. Unless the client list
+      // is a CURRENT success the binding is UNKNOWN and no route may be
+      // chosen: the menu item is disabled until then, and this guard
+      // backstops a race — a permanent wrong choice on a guess is never
+      // acceptable. A failed refresh never routes, even when stale data is
+      // retained: a binding changed since the snapshot could repeat the
+      // origin-drift dead end or silently rebind to an automatic client.
+      const route = reconnectRoute(
+        clientsView.kind === "ready" ? clientsView.clients : undefined,
+        connection,
+        hasDcr(method),
+      );
+      if (route.kind === "unknown") return;
+      if (route.kind === "automatic") {
+        props.onDcrReconnect(connection, route.stored);
         return;
       }
       const payload = oauthReconnectPayload(connection);
       if (payload === null) return;
+      // Claim the sign-in window on the click: `oauth.start` below is a network
+      // round trip, and the browser's user activation can expire before it
+      // answers, which would leave Reconnect silently doing nothing.
+      const reservation = oauthPopup.reserve();
+      if (reservation.kind === "blocked") return;
       // `oauth.start` discriminates the grant: client_credentials mints inline
       // (`status: "connected"`, no authorization URL) while authorization_code
       // returns a redirect the popup must complete. The popup hook only handles
@@ -260,6 +431,7 @@ function OwnerAccounts(props: {
         reactivityKeys: connectionWriteKeys,
       });
       if (Exit.isFailure(startExit)) {
+        oauthPopup.releaseReservation();
         toast.error(messageFromExit(startExit, "Failed to reconnect"));
         trackEvent("connection_reconnected", {
           integration_slug: String(connection.integration),
@@ -270,6 +442,7 @@ function OwnerAccounts(props: {
       }
       const started = startExit.value;
       if (started.status === "connected") {
+        oauthPopup.releaseReservation();
         toast.success("Reconnected");
         trackEvent("connection_reconnected", {
           integration_slug: String(connection.integration),
@@ -280,6 +453,7 @@ function OwnerAccounts(props: {
       }
       void oauthPopup.openAuthorization({
         owner: payload.owner,
+        reservation,
         run: () =>
           Promise.resolve({
             state: started.state,
@@ -324,6 +498,7 @@ function OwnerAccounts(props: {
   };
 
   const handleRemove = async (connection: Connection) => {
+    setRemovingConnection(null);
     const exit = await doRemove({
       params: {
         owner: connection.owner,
@@ -352,12 +527,61 @@ function OwnerAccounts(props: {
             connection={connection}
             needsReconsent={connectionNeedsReconsent(connection, props.declaredScopes)}
             showOwnerLabel={props.showOwnerLabels}
+            canManage={props.canManageConnections}
+            canReconnect={canReconnectConnectionForAccess(
+              props.canManageConnections,
+              reconnectMode(connection),
+            )}
             onEdit={() => props.onEdit(connection)}
             onReconnect={() => void handleReconnect(connection)}
-            onRemove={() => void handleRemove(connection)}
+            // An OAuth Reconnect routes by the stored client binding; without
+            // a current successful load (loading or failed) the route is
+            // unknown, so the action waits. Static-credential rows refresh
+            // without the binding.
+            reconnectDisabled={
+              reconnectMode(connection) === "oauth" && clientsView.kind !== "ready"
+            }
+            // A failed load is surfaced on the item (not silently disabled)
+            // and recovers on menu open, which retries the query.
+            reconnectFailed={reconnectMode(connection) === "oauth" && clientsView.kind === "failed"}
+            onMenuOpenChange={(open: boolean) =>
+              retryReconnectClientsOnMenuOpen(open, clientsView, refreshClients)
+            }
+            onRemove={() => setRemovingConnection(connection)}
           />
         ))}
       </CardStackContent>
+      <AlertDialog
+        open={props.canManageConnections && removingConnection !== null}
+        onOpenChange={(open: boolean) => {
+          if (!open) setRemovingConnection(null);
+        }}
+      >
+        <AlertDialogContent size="sm">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Remove {connectionDisplayLabel(removingConnection)}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Tools using this connection lose access. This cannot be undone; reconnecting later
+              creates a new connection.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              variant="destructive"
+              onClick={() => {
+                if (props.canManageConnections && removingConnection !== null) {
+                  void handleRemove(removingConnection);
+                }
+              }}
+            >
+              Remove connection
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </CardStack>
   );
 }
@@ -384,13 +608,15 @@ export function AccountsSection(props: {
   const [editingConnection, setEditingConnection] = useState<Connection | null>(null);
   const [reconnectHandoff, setReconnectHandoff] = useState<IntegrationAccountHandoff | null>(null);
   const ownerDisplay = useOwnerDisplay();
-  const canAddConnection = methods.length > 0 || createCustomMethod !== undefined;
+  const canCreateWorkspaceConnections = useCanCreateWorkspaceConnections();
+  const canAddConnection =
+    methods.length > 0 || (canCreateWorkspaceConnections && createCustomMethod !== undefined);
 
   useEffect(() => {
-    if (accountHandoff) {
+    if (accountHandoff && canAddConnection) {
       setAdding(true);
     }
-  }, [accountHandoff]);
+  }, [accountHandoff, canAddConnection]);
 
   // The integration's declared oauth scopes — what connections need granted. A
   // connection granted fewer is flagged to reconnect (e.g. after a service was
@@ -462,14 +688,8 @@ export function AccountsSection(props: {
         <h3 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
           Connections
         </h3>
-        {!showEmptyState ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={openAddConnection}
-            disabled={!canAddConnection}
-          >
+        {!showEmptyState && canAddConnection ? (
+          <Button type="button" variant="outline" size="sm" onClick={openAddConnection}>
             Add connection
           </Button>
         ) : null}
@@ -484,17 +704,15 @@ export function AccountsSection(props: {
         <div className="rounded-lg border border-dashed border-border/60 px-6 py-8 text-center">
           <p className="text-sm font-medium text-foreground">No connections yet</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            Add a connection to make this integration's tools available.
+            {canAddConnection
+              ? "Add a connection to make this integration's tools available."
+              : "Ask a workspace admin to configure an authentication method for this integration."}
           </p>
-          <Button
-            type="button"
-            className="mt-4"
-            size="sm"
-            onClick={openAddConnection}
-            disabled={!canAddConnection}
-          >
-            Add connection
-          </Button>
+          {canAddConnection ? (
+            <Button type="button" className="mt-4" size="sm" onClick={openAddConnection}>
+              Add connection
+            </Button>
+          ) : null}
         </div>
       ) : (
         <div className="space-y-4">
@@ -504,9 +722,16 @@ export function AccountsSection(props: {
               integration={integration}
               owner={owner}
               showOwnerLabels={ownerDisplay.showOwnerLabels}
+              canManageConnections={canManageConnectionForAccess(
+                owner,
+                canCreateWorkspaceConnections,
+              )}
               methods={methods}
               onEdit={setEditingConnection}
-              onDcrReconnect={(connection: Connection) => {
+              onDcrReconnect={(
+                connection: Connection,
+                storedClient: OAuthClientSummary | undefined,
+              ) => {
                 if (connection.oauthClient == null) return;
                 setReconnectHandoff({
                   key: `reconnect:${connection.owner}:${String(connection.integration)}:${String(
@@ -522,6 +747,19 @@ export function AccountsSection(props: {
                     action: "reconnect",
                     slug: String(connection.oauthClient),
                     owner: connection.oauthClientOwner ?? connection.owner,
+                    // Vetted by the routing in `handleReconnect`: the stored
+                    // binding is auto-minted DCR (or its row is gone), so the
+                    // modal may re-run the automatic flow.
+                    dynamicRegistration: true,
+                    // The stored client's RFC 8707 resource — an EXPLICIT null
+                    // for a client registered WITHOUT a resource indicator
+                    // (that absence always survives re-registration); a stored
+                    // value is reconciled against the probe downstream, so a
+                    // migrated resource follows the server. Omitted when the
+                    // row is gone.
+                    ...(storedClient !== undefined
+                      ? { resource: storedClient.resource ?? null }
+                      : {}),
                   },
                 });
               }}

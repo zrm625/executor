@@ -4,15 +4,20 @@ import {
   McpAuthProvider,
   jsonRpcErrorBody,
   defaultMcpResource,
+  orgWriteAccessForPrincipal,
+  withOrgWriteAccess,
   type AuthOutcome,
   type Principal,
 } from "@executor-js/host-mcp";
 import {
   currentPropagationHeaders,
+  readArtifactsEnabled,
   readElicitationMode,
+  readSearchToolsEnabled,
   withVerifiedIdentityHeaders,
 } from "@executor-js/cloudflare/mcp/do-headers";
 import type { McpSessionProps } from "@executor-js/cloudflare/mcp/agent-durable-object";
+import { sessionOrgRoleMetadata } from "@executor-js/cloudflare/mcp/role-metadata";
 import { mcpSessionStub } from "@executor-js/cloudflare/mcp/session-stub";
 
 import type { CloudflareConfig, CloudflareEnv } from "../config";
@@ -76,8 +81,11 @@ const propsForPrincipal = (
     return {
       session: {
         organizationId: principal.organizationId,
+        ...sessionOrgRoleMetadata(principal),
         userId: principal.accountId,
         elicitationMode: readElicitationMode(request),
+        artifactsEnabled: readArtifactsEnabled(request),
+        searchToolsEnabled: readSearchToolsEnabled(request),
         // host-cloudflare only routes the bare `/mcp` endpoint to the Agent
         // bridge (see worker.ts), so the session always serves the default
         // resource.
@@ -136,13 +144,16 @@ export const makeCloudflareMcpAgentHandler = (config: CloudflareConfig) => {
 
     const props = await Effect.runPromise(propsForPrincipal(request, outcome.principal));
     (ctx as ExecutionContext & { props?: McpSessionProps }).props = props;
-    const forwarded = withVerifiedIdentityHeaders(
-      request,
-      {
-        accountId: outcome.principal.accountId,
-        organizationId: outcome.principal.organizationId,
-      },
-      defaultMcpResource,
+    const forwarded = withOrgWriteAccess(
+      withVerifiedIdentityHeaders(
+        request,
+        {
+          accountId: outcome.principal.accountId,
+          organizationId: outcome.principal.organizationId,
+        },
+        defaultMcpResource,
+      ),
+      orgWriteAccessForPrincipal(outcome.principal),
     );
     return serve.fetch(forwarded, env, ctx);
   };

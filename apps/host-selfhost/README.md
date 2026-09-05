@@ -54,7 +54,7 @@ Then set `EXECUTOR_WEB_BASE_URL`, `EXECUTOR_OIDC_ENABLED=true`, and the exact
 `EXECUTOR_OIDC_CLIENT_ID` values supplied by the provider. Every URL must be a
 credential-free HTTPS URL without a query or fragment. Supply exactly one of
 `EXECUTOR_OIDC_CLIENT_SECRET` or `EXECUTOR_OIDC_CLIENT_SECRET_FILE`. A secret
-must be exactly 64 base64url characters. A secret file must be a non-symlink
+is the nonempty opaque value issued by the provider. A secret file must be a non-symlink
 regular file owned by the Executor process UID with mode `0600`.
 
 OIDC cannot create an Executor user or silently attach to an email match. Each
@@ -64,6 +64,14 @@ with PKCE S256 and `client_secret_basic`, and accepts identity only from the
 configured UserInfo endpoint with a stable subject and verified email. UserInfo
 must be HTTPS JSON, arrive within five seconds, and fit within 16 KiB;
 redirects, malformed or oversized claims, and unverified email fail closed.
+The separate `EXECUTOR_SSO_*` provider can coexist with external OIDC. Its
+verified-domain signup and verified-email linking behavior remains independent;
+`external-oidc` is reserved and cannot be used as its provider ID. Existing
+setup or invite accounts can choose **Link <provider> to an existing account**
+on the login page, prove their local password, and approve the matching,
+verified provider identity. No local email-verification delivery or database
+edit is needed. SSO linking still requires an allowed provider email domain;
+failed sign-in or linking returns to the login form with the requested page retained.
 After linking, either login method remains available. Raw ID tokens are not
 persisted; access and refresh tokens are encrypted at rest.
 
@@ -93,3 +101,12 @@ src/
   db/ · mcp/ · execution.ts · plugins.ts · observability.ts
 web/                the TanStack Router SPA (setup, login, join, admin, …)
 ```
+
+External OIDC links now bind the subject to the configured issuer. Existing
+subject-only links are retained but cannot authenticate: their original issuer
+was not recorded. Users must sign in with their local password and explicitly
+link again with a matching verified provider email. Changing issuer requires
+that same proof; it never reuses another issuer's link. No automatic database
+rewrite or link deletion occurs. Qualify local account access before upgrading.
+A source downgrade does not understand new links and may reactivate old links;
+do not downgrade with a different issuer or assume database rollback safety.

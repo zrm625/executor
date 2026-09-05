@@ -7,6 +7,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import executorVitePlugin from "@executor-js/vite-plugin";
+import { innerRendererPlugin, mcpAppsShellAsset } from "@executor-js/mcp-apps-shell/vite";
 
 import { routes } from "./tsr.routes";
 import { MCP_ORIGINAL_PATH_HEADER, stripMcpOrgSegment } from "./src/mcp/org-path";
@@ -157,7 +158,13 @@ function executorApiPlugin(): Plugin {
 
           const response = await handler(webRequest);
           res.statusCode = response.status;
-          response.headers.forEach((value, key) => res.setHeader(key, value));
+          response.headers.forEach((value, key) => {
+            if (key.toLowerCase() !== "set-cookie") res.setHeader(key, value);
+          });
+          // Set-Cookie is repeatable, not comma-joinable. In Bun, forEach visits
+          // each cookie separately; setHeader would overwrite all but the last.
+          const cookies = response.headers.getSetCookie();
+          if (cookies.length > 0) res.setHeader("set-cookie", cookies);
           if (response.body) {
             const reader = response.body.getReader();
             for (;;) {
@@ -230,6 +237,12 @@ export default defineConfig({
   plugins: [
     executorApiPlugin(),
     tailwindcss(),
+    // The artifact page hosts the MCP-Apps shell as a sandboxed iframe over the
+    // MCP-Apps protocol: `mcpAppsShellAsset` emits the built shell document and
+    // hands the page its URL, and `innerRendererPlugin` inlines the shell's own
+    // sandboxed inner frame from `virtual:executor-inner-renderer`.
+    mcpAppsShellAsset() as Plugin,
+    innerRendererPlugin(),
     executorVitePlugin({
       configPath: fileURLToPath(new URL("./executor.config.ts", import.meta.url)),
     }),

@@ -26,39 +26,36 @@ import { Api, Target } from "../src/services";
 
 const coreApi = composePluginApi([] as const);
 
+/** The deterministic value the gated script returns once approved. Asserting
+ *  the completed response against it byte-for-byte (non-ASCII included) pins
+ *  output fidelity on the autoApprove path — the panel must render exactly
+ *  what the script returned. */
+const approvedPayload = {
+  note: "auto-approved — résultat 完了 ✅",
+  values: [1, 2, 3],
+};
+
 /** Sandbox code that creates a policy through the approval-gated core tool. The
  *  pattern is unique-per-run and matches no real tool, so the rule is inert. */
 const createPolicyCode = (pattern: string) => `
-return await tools.executor.coreTools.policies.create({
+await tools.executor.coreTools.policies.create({
   owner: "user",
   pattern: ${JSON.stringify(pattern)},
   action: "block",
 });
+return ${JSON.stringify(approvedPayload)};
 `;
 
-// `autoApprove: true` on `POST /executions` still comes back `"paused"` instead
-// of `"completed"`. Traced the full wiring end to end — HTTP payload schema
-// (packages/core/api/src/executions/api.ts), the handler
-// (packages/core/api/src/handlers/executions.ts), `startPausableExecution`'s
-// `autoApprove` short-circuit into `runInlineExecution` with `acceptAllHandler`,
-// `makeFullInvoker` -> `makeExecutorToolInvoker`, and the static-tool dispatch
-// + `enforceApproval`/`buildElicit` in packages/core/sdk/src/executor.ts — every
-// layer threads the per-call elicitation handler correctly and matches the
-// already-working `policies.list` gate exercised by
-// scenarios/browser-approval.test.ts. No defect found by static reading; this
-// needs a live-debugged trace of the sandboxed `codeExecutor.execute` run to
-// find where the accept-all handler stops taking effect. The feature and this
-// test shipped together in the same commit (a150db97, "Run panel: auto-approve
-// operator-invoked tools (#1183)") and this scenario has never gone green on
-// main since — a real product bug, not a stale assertion; suspect: the
-// autoApprove short-circuit in packages/core/execution/src/engine.ts's
-// `startPausableExecution` (or its sandbox integration), needs live debugging.
-const RUN_PANEL_AUTO_APPROVE_SKIP =
-  'autoApprove: true still returns "paused" instead of "completed" — wiring traced end to end (HTTP schema, handler, engine\'s autoApprove short-circuit, makeFullInvoker, static-tool dispatch/enforceApproval) with no defect found statically; never green since introduction in a150db97 (#1183) — suspect: packages/core/execution/src/engine.ts\'s startPausableExecution autoApprove path, needs live debugging';
-
+// Why this was long skipped: `autoApprove: true` came back `"paused"` instead of
+// `"completed"`, and static reading of the wiring (HTTP schema, handler, the
+// engine's autoApprove short-circuit, makeFullInvoker, enforceApproval) found no
+// defect — because there wasn't one on that path. Cloud's engine decorators
+// rebuild the ExecutionEngine object literal member by member, and
+// `withExecutionUsageTracking` declared `executeWithPause: (code)`, dropping the
+// options argument that carries `autoApprove` before it ever reached the engine.
 scenario(
   "Run panel · autoApprove runs an approval-gated tool that otherwise pauses",
-  { skip: RUN_PANEL_AUTO_APPROVE_SKIP },
+  {},
   Effect.gen(function* () {
     const target = yield* Target;
     const apiSurface = yield* Api;
@@ -110,6 +107,12 @@ scenario(
       expect(approved.status, "autoApprove runs the gated tool to completion").toBe("completed");
       if (approved.status !== "completed") return; // narrowing only
       expect(approved.isError, "the auto-approved run is not an error").toBe(false);
+      expect(approved.text, "the returned value reaches the panel byte-identical").toBe(
+        JSON.stringify(approvedPayload, null, 2),
+      );
+      expect(approved.structured, "the structured result mirrors the exact returned value").toEqual(
+        { status: "completed", result: approvedPayload, logs: [] },
+      );
 
       const afterApproval = yield* client.policies.list();
       expect(
