@@ -3,6 +3,7 @@ import type { ResumeResponse } from "@executor-js/execution";
 import type {
   IncomingTraceHeaders,
   McpApprovalOwner,
+  McpApprovalPrincipal,
   McpSessionApprovalResult,
   McpSessionModelResumeResult,
   McpSessionResumeApprovalResult,
@@ -26,7 +27,7 @@ export interface McpSessionStub {
   ) => Promise<McpSessionApprovalResult>;
   readonly resumeExecutionForApproval: (
     executionId: string,
-    identity: McpApprovalOwner,
+    identity: McpApprovalPrincipal,
     response: ResumeResponse,
     incoming?: IncomingTraceHeaders,
   ) => Promise<McpSessionResumeApprovalResult>;
@@ -36,6 +37,14 @@ export interface McpSessionStub {
     response: ResumeResponse,
     incoming?: IncomingTraceHeaders,
   ) => Promise<McpSessionModelResumeResult>;
+  /**
+   * Ask this session's OWN Durable Object instance to tear down its resident
+   * runtime because the isolate is over its cap. Routed through the stub
+   * rather than called on an in-process reference so the teardown runs in
+   * this session's own IoContext — see `requestSelfEviction` on the base
+   * class for why that boundary matters.
+   */
+  readonly requestCapEviction: () => Promise<void>;
 }
 
 export const mcpSessionStub = <Id>(

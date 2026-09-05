@@ -24,6 +24,13 @@ process.env.BETTER_AUTH_SECRET = "test-secret-0123456789-abcdefghijklmnop-qrstuv
 process.env.EXECUTOR_BOOTSTRAP_ADMIN_EMAIL = "linked@example.test";
 process.env.EXECUTOR_BOOTSTRAP_ADMIN_PASSWORD = "linked-password-123";
 process.env.EXECUTOR_WEB_BASE_URL = BASE;
+// A matching SSO allowlist must never admit an unlinked external OIDC user.
+process.env.EXECUTOR_SSO_PROVIDER_ID = "okta";
+process.env.EXECUTOR_SSO_DISCOVERY_URL =
+  "https://sso.example.test/.well-known/openid-configuration";
+process.env.EXECUTOR_SSO_CLIENT_ID = "sso-client";
+process.env.EXECUTOR_SSO_CLIENT_SECRET = CLIENT_SECRET;
+process.env.EXECUTOR_SSO_ALLOWED_DOMAINS = "example.test";
 process.env.EXECUTOR_OIDC_ENABLED = "true";
 process.env.EXECUTOR_OIDC_ISSUER = ISSUER;
 process.env.EXECUTOR_OIDC_AUTHORIZATION_URL = AUTHORIZATION_URL;
@@ -48,6 +55,13 @@ const emulator: Emulator = await createEmulator({
     okta: {
       users: [
         {
+          okta_id: "oidc-sso-subject",
+          login: "sso@example.test",
+          email: "sso@example.test",
+          first_name: "SSO",
+          last_name: "Member",
+        },
+        {
           okta_id: "oidc-linked-subject",
           login: "linked@example.test",
           email: "linked@example.test",
@@ -71,6 +85,16 @@ const emulator: Emulator = await createEmulator({
       ],
       oauth_clients: [
         {
+          client_id: "sso-client",
+          client_secret: CLIENT_SECRET,
+          name: "SSO callback contract",
+          redirect_uris: [`${BASE}/api/auth/oauth2/callback/okta`],
+          response_types: ["code"],
+          grant_types: ["authorization_code"],
+          token_endpoint_auth_method: "client_secret_post",
+          auth_server_id: "default",
+        },
+        {
           client_id: "executor",
           client_secret: CLIENT_SECRET,
           name: "Executor callback contract",
@@ -84,6 +108,8 @@ const emulator: Emulator = await createEmulator({
     },
   },
 });
+
+process.env.EXECUTOR_SSO_DISCOVERY_URL = `${emulator.url}/oauth2/default/.well-known/openid-configuration`;
 
 const nativeFetch = globalThis.fetch;
 const providerFetch = vi.spyOn(globalThis, "fetch").mockImplementation((input, init) => {
@@ -184,11 +210,35 @@ const finishOidc = async (
   );
   expect(selected.status).toBe(302);
   const callback = new URL(selected.headers.get("location") ?? "");
-  callback.searchParams.set("iss", ISSUER);
+  if (callback.pathname.endsWith(EXTERNAL_OIDC_PROVIDER_ID))
+    callback.searchParams.set("iss", ISSUER);
   return handler(new Request(callback, { headers: { cookie: started.cookie } }));
 };
 
 test("real OIDC callbacks deny signup and takeover while explicit matching links remain usable", async () => {
+  const ssoStart = await handler(
+    new Request(`${BASE}/api/auth/sign-in/oauth2`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: BASE },
+      body: JSON.stringify({ providerId: "okta", callbackURL: "/" }),
+    }),
+  );
+  expect(ssoStart.status).toBe(200);
+  const ssoBody = (await ssoStart.json()) as { url: string };
+  const ssoCallback = await finishOidc(
+    { authorization: new URL(ssoBody.url), cookie: cookieHeader(ssoStart) },
+    "oidc-sso-subject",
+  );
+  expect(ssoCallback.status).toBe(302);
+  expect(callbackError(ssoCallback)).toBeNull();
+  // Even a verified local email must remain unlinked after an SSO callback.
+  const verificationDb = createClient({ url: `file:${join(DATA_DIR, "data.db")}` });
+  await verificationDb.execute({
+    sql: "UPDATE user SET emailVerified = 1 WHERE email = ?",
+    args: ["linked@example.test"],
+  });
+  verificationDb.close();
+
   const unknown = await finishOidc(await startOidc("signin"), "oidc-new-subject");
   expect(unknown.status).toBe(302);
   expect(callbackError(unknown)).toBe("signup_disabled");

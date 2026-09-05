@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useAtomSet, useAtomValue } from "@effect/atom-react";
+import { useAtomRefresh, useAtomSet, useAtomValue } from "@effect/atom-react";
 import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import * as AsyncResult from "effect/unstable/reactivity/AsyncResult";
 import {
   ConnectionName,
@@ -14,6 +16,7 @@ import {
   type HealthCheckResult,
   type HealthCheckSpec,
   type OAuthClientSummary,
+  type OAuthProbeResult,
   type Owner,
 } from "@executor-js/sdk/shared";
 import type { IntegrationAccountHandoff } from "@executor-js/sdk/client";
@@ -24,6 +27,7 @@ import {
   checkConnectionHealth,
   connectionsAllAtom,
   createOAuthClientOptimistic,
+  integrationAtom,
   integrationHealthCheckAtom,
   integrationHealthCheckCandidatesAtom,
   oauthClientsOptimisticAtom,
@@ -48,10 +52,11 @@ import { FreeformCombobox, type FreeformComboboxOption } from "./combobox";
 import { messageFromExit } from "../api/error-reporting";
 import { trackEvent } from "../api/analytics";
 import { useOrganizationId } from "../api/organization-context";
+import { useCanCreateWorkspaceConnections } from "../multiplayer/use-admin-nav";
 import { ownerLabel, ownerLabelForHost, useOwnerDisplay } from "../api/owner-display";
 import {
   ConnectionOwnerDropdown,
-  connectionOwnerOptionsForHost,
+  connectionOwnerOptionsForAccess,
   defaultConnectionOwnerForHost,
   normalizeConnectionOwner,
   resolveOAuthConnectionOwnerForHost,
@@ -62,6 +67,7 @@ import {
   oauthClientIdMetadataDocumentUrl,
   useOAuthPopupFlow,
   type OAuthCompletionPayload,
+  type OAuthPopupReservation,
 } from "../plugins/oauth-sign-in";
 import {
   clientDisplayName,
@@ -81,6 +87,7 @@ import {
 } from "./oauth-client-form";
 import { RemoveOAuthAppDialog } from "./remove-oauth-app-dialog";
 import { AddCustomMethodForm, type CreateCustomMethod } from "./add-custom-method-modal";
+import { CredentialGuidancePanel } from "./credential-guidance";
 import { PlacementLine, type AuthMethod } from "../lib/auth-placements";
 import { connectionIdentifier } from "../lib/connection-name";
 import { Badge } from "./badge";
@@ -104,7 +111,14 @@ import {
 import { Input } from "./input";
 import { Label } from "./label";
 import { RadioGroup, RadioGroupItem } from "./radio-group";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./select";
+import {
+  Combobox,
+  ComboboxContent,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+} from "./combobox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./tabs";
 
 // ---------------------------------------------------------------------------
@@ -333,43 +347,77 @@ function PasteCredentialInputs(props: {
   );
 }
 
+type OnePasswordItem = {
+  readonly id: ProviderItemId;
+  readonly name: string;
+  readonly group?: string;
+};
+
 function OnePasswordItemSelect(props: {
   readonly value: string;
   readonly onChange: (value: string) => void;
 }) {
-  const itemsResult = useAtomValue(providerItemsAtom(ONEPASSWORD_PROVIDER));
+  const itemsAtom = providerItemsAtom(ONEPASSWORD_PROVIDER);
+  const itemsResult = useAtomValue(itemsAtom);
+  const refreshItems = useAtomRefresh(itemsAtom);
+
+  // Stale-while-revalidate: with a retained value the list renders instantly
+  // and one background refresh per mount picks up vault changes (refreshing
+  // keeps the previous value, so nothing flashes). A cold mount is already
+  // fetching — refreshing it would only restart the request. The ref carries
+  // the latest cached-ness into the effect without re-running it.
+  const isCachedRef = useRef(false);
+  isCachedRef.current = AsyncResult.isSuccess(itemsResult);
+  useEffect(() => {
+    if (isCachedRef.current) refreshItems();
+  }, [refreshItems]);
   const state = AsyncResult.matchWithError(
-    itemsResult as AsyncResult.AsyncResult<
-      readonly { readonly id: ProviderItemId; readonly name: string }[],
-      Error
-    >,
+    itemsResult as AsyncResult.AsyncResult<readonly OnePasswordItem[], Error>,
     {
       onInitial: () => ({
-        items: [] as readonly {
-          readonly id: ProviderItemId;
-          readonly name: string;
-        }[],
+        items: [] as readonly OnePasswordItem[],
         loading: true,
         error: null as string | null,
       }),
       onError: () => ({
-        items: [] as readonly {
-          readonly id: ProviderItemId;
-          readonly name: string;
-        }[],
+        items: [] as readonly OnePasswordItem[],
         loading: false,
         error: "Failed to load 1Password items",
       }),
       onDefect: () => ({
-        items: [] as readonly {
-          readonly id: ProviderItemId;
-          readonly name: string;
-        }[],
+        items: [] as readonly OnePasswordItem[],
         loading: false,
         error: "Failed to load 1Password items",
       }),
       onSuccess: ({ value }) => ({ items: value, loading: false, error: null }),
     },
+  );
+
+  const stateItems = state.items;
+  const sorted = useMemo(
+    () =>
+      [...stateItems].sort(
+        (a, b) => a.name.localeCompare(b.name) || (a.group ?? "").localeCompare(b.group ?? ""),
+      ),
+    [stateItems],
+  );
+  const byId = useMemo(() => {
+    const map = new Map<string, OnePasswordItem>();
+    for (const item of sorted) map.set(String(item.id), item);
+    return map;
+  }, [sorted]);
+  const ids = useMemo(() => sorted.map((item) => String(item.id)), [sorted]);
+
+  const filter = useCallback(
+    (id: string, query: string) => {
+      const needle = query.trim().toLowerCase();
+      if (needle === "") return true;
+      const item = byId.get(id);
+      return [item?.name ?? "", item?.group ?? ""].some((part) =>
+        part.toLowerCase().includes(needle),
+      );
+    },
+    [byId],
   );
 
   if (state.loading) {
@@ -384,18 +432,36 @@ function OnePasswordItemSelect(props: {
 
   return (
     <div className="space-y-1" data-ph-block>
-      <Select value={props.value} onValueChange={props.onChange}>
-        <SelectTrigger>
-          <SelectValue placeholder="Select secret" />
-        </SelectTrigger>
-        <SelectContent>
-          {state.items.map((item) => (
-            <SelectItem key={String(item.id)} value={String(item.id)}>
-              {item.name}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <Combobox
+        items={ids}
+        value={props.value.length > 0 ? props.value : null}
+        filter={filter}
+        limit={100}
+        itemToStringLabel={(id: string) => byId.get(id)?.name ?? id}
+        onValueChange={(id) => {
+          if (id !== null) props.onChange(id);
+        }}
+      >
+        <ComboboxInput placeholder="Search 1Password items…" className="w-full" />
+        <ComboboxContent>
+          <ComboboxEmpty>No items match.</ComboboxEmpty>
+          <ComboboxList>
+            {(id: string) => {
+              const item = byId.get(id);
+              return (
+                <ComboboxItem key={id} value={id}>
+                  <span className="min-w-0 flex-1 truncate">{item?.name ?? id}</span>
+                  {item?.group && (
+                    <span className="shrink-0 font-mono text-[11px] text-muted-foreground">
+                      {item.group}
+                    </span>
+                  )}
+                </ComboboxItem>
+              );
+            }}
+          </ComboboxList>
+        </ComboboxContent>
+      </Combobox>
     </div>
   );
 }
@@ -545,9 +611,30 @@ export const connectionLabelForHost = (
   organizationId: string | null,
 ): string => label.trim() || `${ownerLabelForHost(owner, organizationId)} ${integrationName}`;
 
+/** The create endpoint rejected the name as taken (409). Like
+ *  `isIntegrationAlreadyExistsExit`: the error's `message` is a getter derived
+ *  from its fields, so it doesn't survive the wire — match the tag and rebuild
+ *  the message client-side. */
+export const isConnectionAlreadyExistsExit = (exit: Exit.Exit<unknown, unknown>): boolean =>
+  Option.match(Exit.findErrorOption(exit), {
+    onNone: () => false,
+    onSome: Predicate.isTagged("ConnectionAlreadyExistsError"),
+  });
+
+export const connectionExistsMessage = (label: string): string =>
+  `A connection named "${label}" already exists. Pick a different name, or remove the existing connection first.`;
+
 /** The default owner a new connection is saved under when the user makes no
  *  explicit choice. Personal: a connection is most often a personal credential. */
 export const DEFAULT_CONNECTION_OWNER: Owner = "user";
+
+/** The method the modal opens on. OAuth needs a registered app (or a DCR
+ *  round-trip) before "Connect" does anything; a key is one paste. When an
+ *  integration declares both, starting on OAuth greets most users with
+ *  "Register app" — a dead end — while the working method sits one tab over.
+ *  Prefer the first non-OAuth method; OAuth stays one click away. */
+export const preferredMethodId = (methods: readonly AuthMethod[]): string =>
+  (methods.find((method) => method.kind !== "oauth") ?? methods[0])?.id ?? "";
 
 const authMethodKey = (method: AuthMethod): string =>
   method.source === "custom" ? `custom:${String(method.template)}` : `declared:${method.id}`;
@@ -573,18 +660,41 @@ export const connectionNameFrom = (
 ): ConnectionName =>
   connectionIdentifier(connectionLabelForHost(label, owner, integrationName, organizationId));
 
+/** Uniquify a derived callable name against the owner's existing connections
+ *  for the integration: a fresh OAuth connect mints a NEW connection, and two
+ *  untyped connects both derive `personalGmail`; without a suffix the second
+ *  silently replaces the first account's token and label. */
+export const uniqueConnectionName = (
+  base: ConnectionName,
+  takenNames: ReadonlySet<string>,
+): ConnectionName => {
+  if (!takenNames.has(String(base))) return base;
+  let suffix = 2;
+  while (takenNames.has(`${String(base)}${suffix}`)) suffix++;
+  return ConnectionName.make(`${String(base)}${suffix}`);
+};
+
+/** The `oauth.start` identity label: only a label the user actually typed.
+ *  An untyped connect sends none, so the server may fill the label from the
+ *  provider's OIDC claims (the account email) instead of a generic
+ *  "Personal Gmail" that would also clobber a curated label on reconnect. */
+export const typedIdentityLabel = (label: string): string | undefined => {
+  const trimmed = label.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+};
+
 export const oauthIdentityLabelFromHealth = (input: {
   readonly result: HealthCheckResult;
   readonly typedLabel: string;
   readonly storedIdentityLabel?: string | null;
-  readonly defaultIdentityLabel: string;
 }): string | null => {
   const identity = input.result.identity?.trim();
   if (input.result.status !== "healthy" || !identity) return null;
   if (input.typedLabel.trim().length > 0) return null;
-  const defaultLabel = input.defaultIdentityLabel.trim();
-  const storedLabel = (input.storedIdentityLabel ?? defaultLabel).trim();
-  return storedLabel === defaultLabel ? identity : null;
+  // Fill only an unset label: an untyped connect stores none unless the grant
+  // carried OIDC claims, and anything already stored (typed, curated, or
+  // claims-derived) wins over a probed identity.
+  return (input.storedIdentityLabel ?? "").trim().length === 0 ? identity : null;
 };
 
 // ---------------------------------------------------------------------------
@@ -615,7 +725,17 @@ type CimdCreateClientArgs = {
 
 type RunCimdConnectDeps = {
   readonly createClient: (args: CimdCreateClientArgs) => Promise<OAuthClientSlug | null>;
-  readonly start: (args: { readonly client: OAuthClientSlug; readonly owner: Owner }) => void;
+  readonly start: (args: CimdStartArgs) => void;
+  /** Claim the sign-in window before any await. See `useOAuthPopupFlow.reserve`. */
+  readonly reserve: () => OAuthPopupReservation;
+  /** Close a claimed window this flow turned out not to need. */
+  readonly release: () => void;
+};
+
+type CimdStartArgs = {
+  readonly client: OAuthClientSlug;
+  readonly owner: Owner;
+  readonly reservation: OAuthPopupReservation;
 };
 
 type RunCimdConnectInput = {
@@ -630,12 +750,19 @@ type RunCimdConnectInput = {
 
 type CimdOutcome =
   | { readonly kind: "started"; readonly client: OAuthClientSlug; readonly reused: boolean }
+  | { readonly kind: "popup-blocked" }
   | { readonly kind: "failed"; readonly reason: "missing-endpoints" | "create-failed" };
 
-export async function runCimdConnect(
-  deps: RunCimdConnectDeps,
-  input: RunCimdConnectInput,
-): Promise<CimdOutcome> {
+type ResolveCimdClientDeps = Pick<RunCimdConnectDeps, "createClient">;
+type ResolveCimdClientInput = RunCimdConnectInput;
+type ResolveCimdClientOutcome =
+  | { readonly kind: "ready"; readonly client: OAuthClientSlug; readonly reused: boolean }
+  | { readonly kind: "failed"; readonly reason: "missing-endpoints" | "create-failed" };
+
+async function resolveCimdClient(
+  deps: ResolveCimdClientDeps,
+  input: ResolveCimdClientInput,
+): Promise<ResolveCimdClientOutcome> {
   if (input.authorizationUrl.trim().length === 0 || input.tokenUrl.trim().length === 0) {
     return { kind: "failed", reason: "missing-endpoints" };
   }
@@ -651,10 +778,7 @@ export async function runCimdConnect(
       client.clientId === input.clientIdMetadataDocumentUrl,
   );
 
-  if (existing) {
-    deps.start({ client: existing.slug, owner: input.owner });
-    return { kind: "started", client: existing.slug, reused: true };
-  }
+  if (existing) return { kind: "ready", client: existing.slug, reused: true };
 
   const slug = uniqueClientSlug(
     `${input.integrationName} CIMD`,
@@ -671,34 +795,45 @@ export async function runCimdConnect(
     clientSecret: "",
   });
   if (created === null) return { kind: "failed", reason: "create-failed" };
-  deps.start({ client: created, owner: input.owner });
-  return { kind: "started", client: created, reused: false };
+  return { kind: "ready", client: created, reused: false };
+}
+
+export async function runCimdConnect(
+  deps: RunCimdConnectDeps,
+  input: RunCimdConnectInput,
+): Promise<CimdOutcome> {
+  if (input.authorizationUrl.trim().length === 0 || input.tokenUrl.trim().length === 0) {
+    return { kind: "failed", reason: "missing-endpoints" };
+  }
+
+  // Claim the window while the click still counts. Minting the client is a
+  // round trip, and the browser stops honouring `window.open` once the
+  // activation from the click expires.
+  const reservation = deps.reserve();
+  if (reservation.kind === "blocked") return { kind: "popup-blocked" };
+
+  const resolved = await resolveCimdClient(deps, input);
+  if (resolved.kind === "failed") {
+    deps.release();
+    return resolved;
+  }
+  deps.start({ client: resolved.client, owner: input.owner, reservation });
+  return { kind: "started", client: resolved.client, reused: resolved.reused };
 }
 
 // ---------------------------------------------------------------------------
-// Transparent DCR (RFC 7591) connect orchestration.
+// Automatic discovered OAuth connect orchestration.
 //
-// For DCR-capable methods (MCP OAuth) the user clicks one "Connect" button and
-// we do everything: probe the integration's discovery URL → register a client
-// against the advertised registration endpoint → start
-// the OAuth flow with the minted client. No app picker, no pasted client id.
+// MCP OAuth is discovered at connect time. Prefer Client ID Metadata Documents
+// when the authorization server advertises them; otherwise use Dynamic Client
+// Registration when available. Both paths keep the popup reserved by the
+// original click and avoid a provider-specific app picker.
 //
 // This is extracted as a pure-ish orchestrator (injected `probe`/`register`/
 // `start`) so the SEQUENCE is unit-testable without React/atoms. The caller
 // supplies thin adapters over the `probeOAuth` / `registerDynamicOAuthClient` /
 // popup-start atoms.
 // ---------------------------------------------------------------------------
-
-/** Discovery result from the probe step (subset of the `probeOAuth` response). */
-type DcrProbeResult = {
-  readonly issuer?: string | null;
-  readonly authorizationUrl: string;
-  readonly tokenUrl: string;
-  readonly resource?: string | null;
-  readonly scopesSupported?: readonly string[];
-  readonly registrationEndpoint?: string | null;
-  readonly tokenEndpointAuthMethodsSupported?: readonly string[];
-};
 
 type DcrRegisterArgs = {
   readonly owner: Owner;
@@ -718,31 +853,44 @@ type DcrRegisterArgs = {
 type DcrStartArgs = {
   readonly client: OAuthClientSlug;
   readonly owner: Owner;
+  readonly reservation: OAuthPopupReservation;
 };
 
-/** Outcome of the DCR orchestration. `"started"` means the OAuth flow handed
- *  off (the popup/inline start ran); `"fallback"` means we could not auto-set-up
- *  — a failed probe, no registration endpoint, or a failed registration — and
- *  the caller should fall back to the bring-your-own-app picker. A failed probe
+/** Outcome of automatic discovered OAuth orchestration. `"started"` means the OAuth flow handed
+ *  off (the popup/inline start ran); `"popup-blocked"` means the browser refused
+ *  the sign-in window, which no app picker can fix, so the caller reports it
+ *  rather than falling back; `"fallback"` means we could not auto-set-up (a
+ *  failed probe, no registration endpoint, or a failed registration) and the
+ *  caller should fall back to the bring-your-own-app picker. A failed probe
  *  carries no probe result; the other two reasons always carry the probe that
  *  seeds the picker. */
-type DcrOutcome =
-  | { readonly kind: "started" }
+type AutomaticOAuthOutcome =
+  | { readonly kind: "started"; readonly flow: "cimd" | "dcr" }
+  | { readonly kind: "popup-blocked" }
+  /** The owning surface went away mid-flight (`isActive` turned false): the
+   *  sequence stopped before its next side effect and released the window.
+   *  Nothing to report — the modal that would show it is gone. */
+  | { readonly kind: "aborted" }
   | { readonly kind: "fallback"; readonly reason: "probe-failed" }
   | {
       readonly kind: "fallback";
-      readonly reason: "no-registration-endpoint" | "registration-failed";
-      readonly probe: DcrProbeResult;
+      readonly reason:
+        | "no-registration-endpoint"
+        | "client-metadata-failed"
+        | "registration-failed";
+      readonly probe: OAuthProbeResult;
       /** A specific, user-facing reason to surface instead of the generic
        *  "register an app" copy (e.g. a server that rejects the DCR redirect
        *  URI). Absent when the fallback carries no actionable detail. */
       readonly message?: string;
     };
 
-type RunDcrConnectDeps = {
+type RunAutomaticOAuthConnectDeps = {
   /** Probe the discovery URL → resolved endpoints + (maybe) a registration
    *  endpoint. Resolves to null when the probe fails. */
-  readonly probe: (url: string) => Promise<DcrProbeResult | null>;
+  readonly probe: (url: string) => Promise<OAuthProbeResult | null>;
+  /** Create or reuse the local public client used by a CIMD flow. */
+  readonly createCimdClient: ResolveCimdClientDeps["createClient"];
   /** Register a DCR client → the minted client slug, `{ error }` with a
    *  user-facing message when the server rejects registration, or null on an
    *  unexplained failure. */
@@ -751,9 +899,17 @@ type RunDcrConnectDeps = {
   ) => Promise<OAuthClientSlug | { readonly error: string } | null>;
   /** Start the OAuth flow with the minted client (popup / inline). */
   readonly start: (args: DcrStartArgs) => void;
+  /** Claim the sign-in window before any await. See `useOAuthPopupFlow.reserve`. */
+  readonly reserve: () => OAuthPopupReservation;
+  /** Close a claimed window this flow turned out not to need. */
+  readonly release: () => void;
+  /** Whether the surface that started this connect still exists. Checked
+   *  after every awaited round trip: closing the modal mid-flight must not
+   *  register a client or launch the popup afterwards. */
+  readonly isActive: () => boolean;
 };
 
-type RunDcrConnectInput = {
+type RunAutomaticOAuthConnectInput = {
   readonly discoveryUrl: string;
   /** The integration's genuine protected-resource URL (the MCP discovery URL),
    *  used as the RFC 8707 resource indicator when the server's PRM names no
@@ -769,6 +925,21 @@ type RunDcrConnectInput = {
   readonly redirectUri?: string;
   /** Integration that requested this DCR client. */
   readonly integration: IntegrationSlug;
+  /** Executor's public client metadata document and the local clients it may
+   *  reuse when the probe advertises CIMD. */
+  readonly cimd: Pick<
+    RunCimdConnectInput,
+    "integrationName" | "clientIdMetadataDocumentUrl" | "existingClients"
+  >;
+  /** A reconnect carries the STORED client's RFC 8707 resource — including an
+   *  EXPLICIT null for a client registered WITHOUT a resource indicator
+   *  (#1822: some servers reject any `resource` parameter). The flow
+   *  RECONCILES it with the probe: an explicit null always wins (the
+   *  deliberate absence is preserved), a probed resource beats a stored one
+   *  (the server migrated), and the stored one stands when the probe
+   *  advertises none. Undefined (a fresh connect, or the stored row is gone)
+   *  keeps the probed behavior. */
+  readonly storedResource?: string | null;
 };
 
 /** RFC 7591 `client_name` sent for every dynamic registration. Deliberately
@@ -781,23 +952,90 @@ type RunDcrConnectInput = {
 const DCR_CLIENT_NAME = "Executor";
 
 /**
- * Run the transparent DCR connect sequence: probe → register → start.
+ * Run automatic discovered OAuth: reserve → probe → CIMD or DCR → start.
  *
+ * - Popup refused → `{ kind: "popup-blocked" }` before any network call.
  * - Probe failure → `{ kind: "fallback", reason: "probe-failed" }` (caller shows BYO).
- * - No registration endpoint → `{ kind: "fallback", reason: "no-registration-endpoint", probe }`.
+ * - CIMD advertised → create/reuse the public metadata client, then start.
+ * - Otherwise no DCR endpoint → `{ kind: "fallback", reason: "no-registration-endpoint", probe }`.
  * - Register rejected with a message → `{ kind: "fallback", reason: "registration-failed", probe, message }`
  *   so the caller can show why (e.g. a redirect-URI rejection) over the generic copy.
  * - Register failed without detail (null) → `{ kind: "fallback", reason: "registration-failed", probe }`.
- * - Success → registers, calls `start`, returns `{ kind: "started" }`.
+ * - Surface gone after any await (`isActive` false) → `{ kind: "aborted" }`,
+ *   window released, popup never launched. Checked BEFORE inspecting that
+ *   await's result, so aborted wins even when the round trip failed — a
+ *   failure outcome would have the caller write fallback state for a modal
+ *   that no longer exists.
+ * - Success → calls `start` and reports which automatic flow was used.
  */
-export async function runDcrConnect(
-  deps: RunDcrConnectDeps,
-  input: RunDcrConnectInput,
-): Promise<DcrOutcome> {
+export async function runAutomaticOAuthConnect(
+  deps: RunAutomaticOAuthConnectDeps,
+  input: RunAutomaticOAuthConnectInput,
+): Promise<AutomaticOAuthOutcome> {
+  // Claim the sign-in window FIRST, on the click that got us here. Probe and
+  // register are two network round trips; the browser's user activation expires
+  // well before they finish, so a window opened after them is refused and the
+  // connect dies with nothing on screen.
+  const reservation = deps.reserve();
+  if (reservation.kind === "blocked") return { kind: "popup-blocked" };
+
   const probe = await deps.probe(input.discoveryUrl);
-  if (probe === null) return { kind: "fallback", reason: "probe-failed" };
+  // The modal may have closed while the probe was in flight. Stop BEFORE the
+  // next side effect (registration persists a client; start launches the
+  // popup) and give the claimed window back.
+  if (!deps.isActive()) {
+    deps.release();
+    return { kind: "aborted" };
+  }
+  if (probe === null) {
+    deps.release();
+    return { kind: "fallback", reason: "probe-failed" };
+  }
+  // The flow's RFC 8707 resource indicator. A reconnect RECONCILES the stored
+  // value with the probe rather than pinning it: a stored EXPLICIT null always
+  // wins (#1822 — the deliberate absence some servers require), a probed
+  // resource beats a stored one (the server migrated its protected resource,
+  // and the probe is the fresh truth), and a stored resource stands when the
+  // probe advertises none — including over the discovery-URL fallback, which
+  // is our own guess. A fresh connect keeps the probed value with the
+  // discovery-URL fallback.
+  const resource =
+    input.storedResource !== undefined
+      ? input.storedResource === null
+        ? null
+        : (probe.resource ?? input.storedResource)
+      : (probe.resource ?? input.resourceFallback ?? null);
+  if (probe.clientIdMetadataDocumentSupported === true) {
+    const resolved = await resolveCimdClient(
+      { createClient: deps.createCimdClient },
+      {
+        owner: input.owner,
+        integrationName: input.cimd.integrationName,
+        authorizationUrl: probe.authorizationUrl,
+        tokenUrl: probe.tokenUrl,
+        resource,
+        clientIdMetadataDocumentUrl: input.cimd.clientIdMetadataDocumentUrl,
+        existingClients: input.cimd.existingClients,
+      },
+    );
+    // Aborted wins over failure: a "fallback" outcome makes the caller write
+    // recovery state, and the modal that would render it is gone.
+    if (!deps.isActive()) {
+      deps.release();
+      return { kind: "aborted" };
+    }
+    if (resolved.kind === "failed") {
+      deps.release();
+      return { kind: "fallback", reason: "client-metadata-failed", probe };
+    }
+    deps.start({ client: resolved.client, owner: input.owner, reservation });
+    return { kind: "started", flow: "cimd" };
+  }
   const registrationEndpoint = probe.registrationEndpoint;
-  if (!registrationEndpoint) return { kind: "fallback", reason: "no-registration-endpoint", probe };
+  if (!registrationEndpoint) {
+    deps.release();
+    return { kind: "fallback", reason: "no-registration-endpoint", probe };
+  }
 
   const slug = optimisticDcrClientSlug(probe.issuer ?? registrationEndpoint);
   const scopes = registrationScopes(input.declaredScopes ?? [], probe.scopesSupported ?? []);
@@ -808,22 +1046,67 @@ export async function runDcrConnect(
     registrationEndpoint,
     authorizationUrl: probe.authorizationUrl,
     tokenUrl: probe.tokenUrl,
-    resource: probe.resource ?? input.resourceFallback ?? null,
+    resource,
     scopes,
     tokenEndpointAuthMethodsSupported: probe.tokenEndpointAuthMethodsSupported,
     clientName: DCR_CLIENT_NAME,
     redirectUri: input.redirectUri,
     originIntegration: input.integration,
   });
-  if (minted === null) return { kind: "fallback", reason: "registration-failed", probe };
+  // A close that raced the registration itself cannot unmint the client (there
+  // is no server-side cancel) — the row is inert, reusable DCR plumbing — but
+  // nothing may land on the closed surface afterwards: not the sign-in popup,
+  // and not a failure fallback either, so aborted wins over the mint result.
+  if (!deps.isActive()) {
+    deps.release();
+    return { kind: "aborted" };
+  }
+  if (minted === null) {
+    deps.release();
+    return { kind: "fallback", reason: "registration-failed", probe };
+  }
   // OAuthClientSlug is a branded string; an object return carries the failure
   // message (e.g. the server rejected the redirect URI) for the BYO fallback.
   if (typeof minted === "object") {
+    deps.release();
     return { kind: "fallback", reason: "registration-failed", probe, message: minted.error };
   }
-  deps.start({ client: minted, owner: input.owner });
-  return { kind: "started" };
+  deps.start({ client: minted, owner: input.owner, reservation });
+  return { kind: "started", flow: "dcr" };
 }
+
+/**
+ * Can this method go through {@link runAutomaticOAuthConnect} at all?
+ *
+ * True when the integration advertises dynamic registration (MCP oauth2) OR
+ * carries a discovery URL we can probe at connect time — the probe decides
+ * between CIMD and DCR from there. This is a METHOD capability only: a
+ * reconnect routes by the STORED client binding instead (`reconnectRoute`),
+ * so a static/BYO or first-party binding is never silently rebound, and an
+ * auto-minted DCR binding re-registers even when the method declares no
+ * capability (the probe falls back to the token URL).
+ */
+export const hasDcr = (method: AuthMethod | undefined | null): boolean =>
+  method?.kind === "oauth" &&
+  (method.oauth?.supportsDynamicRegistration === true || method.oauth?.discoveryUrl != null);
+
+/** What a caller of the modal's `startAutomaticOAuthConnect` decides for itself. */
+type AutomaticOAuthConnectRequest = {
+  readonly method: AuthMethod;
+  readonly owner: Owner;
+  readonly connectionName: ConnectionName;
+  /** Stored on the connection; undefined leaves it untouched. */
+  readonly identityLabel: string | undefined;
+  /** What the user typed, used to auto-name a NEW connection after connect. */
+  readonly typedLabel: string;
+  /** A reconnect re-authorizes a connection that already exists; a connect
+   *  creates one. The only behavioral difference between the two paths. */
+  readonly mode: "connect" | "reconnect";
+  /** Reconnect only: the stored client's RFC 8707 resource, an EXPLICIT null
+   *  when it was registered WITHOUT one. See
+   *  `RunAutomaticOAuthConnectInput.storedResource`. */
+  readonly storedResource?: string | null;
+};
 
 // ---------------------------------------------------------------------------
 // One row in the OAuth app picker: a radio-select Label plus an actions menu
@@ -853,11 +1136,18 @@ function OAuthAppRadioRow(props: {
         <span className="min-w-0 flex-1">
           <span className="block text-sm font-medium">{clientDisplayName(String(app.slug))}</span>
           <span className="block truncate text-xs text-muted-foreground">
-            {clientHost(app.tokenUrl)} ·{" "}
-            {app.grant === "client_credentials" ? "app-to-app" : "you'll sign in"}
+            {app.origin.kind === "first_party"
+              ? "No setup needed · you'll sign in"
+              : `${clientHost(app.tokenUrl)} · ${
+                  app.grant === "client_credentials" ? "app-to-app" : "you'll sign in"
+                }`}
           </span>
         </span>
-        {showOwnerLabel ? <Badge variant="outline">{ownerLabel(app.owner)}</Badge> : null}
+        {app.origin.kind === "first_party" ? (
+          <Badge variant="outline">Built-in</Badge>
+        ) : showOwnerLabel ? (
+          <Badge variant="outline">{ownerLabel(app.owner)}</Badge>
+        ) : null}
       </Label>
       {onManage ? (
         <DropdownMenu>
@@ -933,7 +1223,13 @@ function HealthStatusLine(props: {
 }) {
   const { status, identity, detail, httpStatus } = props.result;
   const healthy = status === "healthy";
-  const tone = healthy ? "text-muted-foreground" : "text-destructive";
+  // Misconfigured is amber everywhere (see health-display.ts): the credential
+  // being validated is fine, so the verdict must not read as a key failure.
+  const tone = healthy
+    ? "text-muted-foreground"
+    : status === "misconfigured"
+      ? "text-amber-600 dark:text-amber-500"
+      : "text-destructive";
   const font = props.variant === "response" ? "font-mono" : "";
   return (
     <div className={`flex min-w-0 items-center gap-2 text-xs ${tone} ${font}`}>
@@ -1111,16 +1407,25 @@ function AddAccountModalView(props: AddAccountModalProps) {
     open,
     onOpenChange,
     initialState,
-    createCustomMethod,
-    removeCustomMethod,
+    createCustomMethod: requestedCreateCustomMethod,
+    removeCustomMethod: requestedRemoveCustomMethod,
   } = props;
   const organizationId = useOrganizationId();
   const ownerDisplay = useOwnerDisplay();
-  const ownerOptions = useMemo(
-    () => connectionOwnerOptionsForHost(organizationId),
-    [organizationId],
-  );
+  const canCreateWorkspaceConnections = useCanCreateWorkspaceConnections();
+  const ownerOptions = useMemo(() => {
+    return connectionOwnerOptionsForAccess(organizationId, canCreateWorkspaceConnections);
+  }, [canCreateWorkspaceConnections, organizationId]);
   const defaultOwner = defaultConnectionOwnerForHost(organizationId);
+  // Custom methods mutate the workspace-wide integration catalog, so they stay
+  // admin-only even though members can add Personal connections using methods
+  // that an admin has already configured.
+  const createCustomMethod = canCreateWorkspaceConnections
+    ? requestedCreateCustomMethod
+    : undefined;
+  const removeCustomMethod = canCreateWorkspaceConnections
+    ? requestedRemoveCustomMethod
+    : undefined;
 
   // The selectable methods: the declared ones plus any custom method created in
   // this session (so a just-created method shows + can be selected before the
@@ -1138,7 +1443,7 @@ function AddAccountModalView(props: AddAccountModalProps) {
   );
   const [addingMethod, setAddingMethod] = useState(false);
 
-  const [methodId, setMethodId] = useState<string>(methods[0]?.id ?? "");
+  const [methodId, setMethodId] = useState<string>(preferredMethodId(methods));
   // One value per distinct credential input (`variable → pasted value`). A
   // single-secret method has just `{ token }`; a method with two distinct inputs
   // (e.g. Datadog's two keys) collects one value per variable.
@@ -1175,11 +1480,11 @@ function AddAccountModalView(props: AddAccountModalProps) {
   const [registeringOAuthClient, setRegisteringOAuthClient] = useState(false);
   const [ccBusy, setCcBusy] = useState(false);
   const [cimdBusy, setCimdBusy] = useState(false);
-  // Transparent DCR: busy while probing/registering/starting; `dcrFailed` flips
-  // the modal to the bring-your-own-app picker if auto setup is unavailable.
+  // Automatic discovery: busy while probing/setting up/starting; `dcrFailed`
+  // retains its historical name and flips to the bring-your-own-app recovery.
   const [dcrBusy, setDcrBusy] = useState(false);
   const [dcrFailed, setDcrFailed] = useState(false);
-  const [oauthFallbackProbe, setOAuthFallbackProbe] = useState<DcrProbeResult | null>(null);
+  const [oauthFallbackProbe, setOAuthFallbackProbe] = useState<OAuthProbeResult | null>(null);
   // When transparent DCR is rejected with an actionable reason (e.g. the server
   // refuses our redirect URI), surface it as an inline error card on the
   // bring-your-own-app recovery view instead of a transient toast.
@@ -1207,7 +1512,7 @@ function AddAccountModalView(props: AddAccountModalProps) {
   const doRegisterDynamic = useAtomSet(registerDynamicOAuthClient, {
     mode: "promiseExit",
   });
-  const doRemoveOAuthClient = useAtomSet(removeOAuthClientOptimistic, { mode: "promise" });
+  const doRemoveOAuthClient = useAtomSet(removeOAuthClientOptimistic, { mode: "promiseExit" });
   const doValidate = useAtomSet(validateConnection, { mode: "promiseExit" });
   const doCheckConnectionHealth = useAtomSet(checkConnectionHealth, { mode: "promiseExit" });
   const doUpdateConnection = useAtomSet(updateConnection, { mode: "promiseExit" });
@@ -1216,6 +1521,12 @@ function AddAccountModalView(props: AddAccountModalProps) {
   // The integration's declared health check + its candidate operations. When a
   // check is configured we probe against it; when not, the user picks one of the
   // candidates inline to test the key (and we save it).
+  // The integration's display URL is how the registry's credential guidance is
+  // located — it names the provider this key belongs to.
+  const integrationRecord = useAtomValue(integrationAtom(integration));
+  const integrationDisplayUrl = AsyncResult.isSuccess(integrationRecord)
+    ? integrationRecord.value?.displayUrl
+    : undefined;
   const healthCheckResult = useAtomValue(integrationHealthCheckAtom(integration));
   const configuredHealthCheck = AsyncResult.isSuccess(healthCheckResult)
     ? healthCheckResult.value
@@ -1241,6 +1552,30 @@ function AddAccountModalView(props: AddAccountModalProps) {
     () => buildUsageMap(AsyncResult.isSuccess(connectionsResult) ? connectionsResult.value : []),
     [connectionsResult],
   );
+  // PREVIEW-ONLY uniquify against the loaded connections list: the callable
+  // name shown before an OAuth connect anticipates the server's suffixing
+  // (`personalGmail2`). The AUTHORITATIVE resolution happens in `oauth.start`
+  // against stored rows (`newConnection: true`); this view may be stale or
+  // policy-filtered and must never be the thing preventing an overwrite.
+  const takenConnectionNames = useMemo<ReadonlyMap<Owner, ReadonlySet<string>>>(() => {
+    const map = new Map<Owner, Set<string>>();
+    if (!AsyncResult.isSuccess(connectionsResult)) return map;
+    for (const connection of connectionsResult.value) {
+      if (String(connection.integration) !== String(integration)) continue;
+      const names = map.get(connection.owner) ?? new Set<string>();
+      names.add(String(connection.name));
+      map.set(connection.owner, names);
+    }
+    return map;
+  }, [connectionsResult, integration]);
+  const previewConnectionName = useCallback(
+    (typed: string, connectionOwner: Owner): ConnectionName =>
+      uniqueConnectionName(
+        connectionNameFrom(typed, connectionOwner, integrationName, organizationId),
+        takenConnectionNames.get(connectionOwner) ?? new Set<string>(),
+      ),
+    [takenConnectionNames, integrationName, organizationId],
+  );
 
   const method = useMemo(
     () => allMethods.find((m: AuthMethod) => m.id === methodId) ?? allMethods[0],
@@ -1256,8 +1591,19 @@ function AddAccountModalView(props: AddAccountModalProps) {
     setMethodId(allMethods[0]!.id);
   }, [allMethods, methodId]);
 
+  // Apply the handoff prefill ONCE per handoff key (tracked by ref). The
+  // effect's deps include `allMethods`, which gets a new identity whenever the
+  // integration refetches — and the wizard itself triggers a refetch mid-flow
+  // (Continue probes the key and saves the health check). Re-running the reset
+  // then would wipe the credential the user just pasted.
+  const handoffAppliedKey = useRef<string | null>(null);
   useEffect(() => {
     if (!initialState) return;
+    // Methods load in a second fetch after the modal opens; when the handoff
+    // preselects one, retry until they land so the match has something to hit.
+    if (initialState.template != null && allMethods.length === 0) return;
+    if (handoffAppliedKey.current === initialState.key) return;
+    handoffAppliedKey.current = initialState.key;
     const initialMethod = initialState.template
       ? allMethods.find(
           (m: AuthMethod) =>
@@ -1285,7 +1631,7 @@ function AddAccountModalView(props: AddAccountModalProps) {
             m.id === initialState.template || String(m.template) === initialState.template,
         )
       : undefined;
-    setMethodId(initialMethod?.id ?? allMethods[0]!.id);
+    setMethodId(initialMethod?.id ?? preferredMethodId(allMethods));
   }, [allMethods, initialState?.template, methodId]);
 
   // Non-secret prefill carried by an `oauth.clients.createHandoff` deep link.
@@ -1424,13 +1770,9 @@ function AddAccountModalView(props: AddAccountModalProps) {
         : `?${placement.name || "api_key"}=`;
     return `${lead}${placement.prefix ?? ""}`;
   }, [method, singleInput, isEnvMethod]);
-  // DCR-capable: the integration advertises dynamic registration (MCP oauth2),
-  // OR carries a discovery URL we can probe at connect time. When DCR-capable
-  // and not yet fallen back, we skip the app picker entirely (Option A).
-  const isDcr =
-    !cimdActive &&
-    isOAuth &&
-    (method?.oauth?.supportsDynamicRegistration === true || method?.oauth?.discoveryUrl != null);
+  // DCR-capable (see `hasDcr`). When DCR-capable and not yet fallen back, we
+  // skip the app picker entirely (Option A).
+  const isDcr = !cimdActive && hasDcr(method);
   const dcrActive = isDcr && !dcrFailed;
   const automaticOAuthActive = cimdActive || dcrActive;
 
@@ -1451,6 +1793,10 @@ function AddAccountModalView(props: AddAccountModalProps) {
     // unrelated provider's app.
     tokenUrl: method?.oauth?.tokenUrl ?? oauthFallbackProbe?.tokenUrl,
     authorizationUrl: method?.oauth?.authorizationUrl ?? oauthFallbackProbe?.authorizationUrl,
+    scopes: method?.oauth?.scopes,
+    // MCP OAuth scopes are discovered by the server at connect time, where a
+    // first-party app's configured allow-list caps the provider's catalog.
+    discoversScopes: isDcr,
     // Recorded intent: a manual app registered from THIS integration's dialog is
     // a tier-1 match regardless of host.
     integration,
@@ -1499,6 +1845,9 @@ function AddAccountModalView(props: AddAccountModalProps) {
     [...oauthApps, ...oauthNearApps, ...oauthOtherApps].find(
       (c: OAuthClientOption) => String(c.slug) === selectedApp,
     ) ?? null;
+  const isBuiltInGoogleClient =
+    chosenClient?.origin.kind === "first_party" &&
+    String(chosenClient.slug) === "first-party:google";
   const oauthBusy = ccBusy || oauthPopup.busy;
   const cimdConnecting = cimdBusy || oauthPopup.busy;
   const dcrConnecting = dcrBusy || oauthPopup.busy;
@@ -1523,7 +1872,13 @@ function AddAccountModalView(props: AddAccountModalProps) {
   const savedToOptions = isOAuth && !automaticOAuthActive ? oauthConnectionOptions : ownerOptions;
   const savedToOwner = isOAuth && !automaticOAuthActive ? oauthConnectionOwner : owner;
   const showSavedToPicker = !oauthRegistering && savedToOptions.length > 1;
-  const callableName = connectionNameFrom(label, savedToOwner, integrationName, organizationId);
+  // OAuth mints a NEW connection per connect, so its preview shows the
+  // uniquified name (`personalGmail2`); credential saves keep the plain
+  // derivation, because a save under a taken name is a conflict the server
+  // rejects rather than something the client silently renames around.
+  const callableName = isOAuth
+    ? previewConnectionName(label, savedToOwner)
+    : connectionNameFrom(label, savedToOwner, integrationName, organizationId);
   const authStepLabel = isOAuth ? (cimdActive ? "OAuth setup" : "OAuth app") : "Credential";
 
   // Build the picker row's Edit/Remove menu for an app, but only once its full
@@ -1532,6 +1887,11 @@ function AddAccountModalView(props: AddAccountModalProps) {
   const manageHandlersFor = (
     appOption: OAuthClientOption,
   ): { readonly onEdit: () => void; readonly onRemove: () => void } | undefined => {
+    // First-party apps are host config, not rows: nothing to edit or remove.
+    if (appOption.origin.kind === "first_party") return undefined;
+    // Members may use a shared app to mint their own Personal connection, but
+    // only admins may edit or remove that Workspace-owned app.
+    if (appOption.owner === "org" && !canCreateWorkspaceConnections) return undefined;
     const summary = clientSummaries.find(
       (c: OAuthClientSummary) =>
         c.owner === appOption.owner && String(c.slug) === String(appOption.slug),
@@ -1547,12 +1907,16 @@ function AddAccountModalView(props: AddAccountModalProps) {
   // reconnect at their next refresh); clear the picked app if it was the one
   // removed so the connect button doesn't point at a gone slug.
   const handleRemoveApp = async (client: OAuthClientSummary): Promise<void> => {
-    setRemovingClient(null);
-    await doRemoveOAuthClient({
+    const exit = await doRemoveOAuthClient({
       params: { slug: client.slug },
       payload: { owner: client.owner },
       reactivityKeys: oauthClientWriteKeys,
     });
+    if (Exit.isFailure(exit)) {
+      toast.error(messageFromExit(exit, `Failed to remove ${String(client.slug)}`));
+      return;
+    }
+    setRemovingClient(null);
     trackEvent("oauth_client_removed", { owner: client.owner });
     toast.success(`Removed ${String(client.slug)}`);
     if (pickedApp === String(client.slug)) setPickedApp(null);
@@ -1612,92 +1976,42 @@ function AddAccountModalView(props: AddAccountModalProps) {
   // OAuth popup flow's busy state die with this instance.
   const close = useCallback(() => onOpenChange(false), [onOpenChange]);
 
-  useEffect(() => {
-    const handoff = initialState;
-    const oauthClient = handoff?.oauthClient;
-    if (!handoff || oauthClient?.action !== "reconnect") return;
-    if (oauthReconnectOpenedKey.current === handoff.key) return;
-    const client = oauthClient.slug;
-    const clientOwner = oauthClient.owner ?? handoff.owner;
-    const connectionOwner = handoff.owner;
-    const connectionName = handoff.label;
-    const oauthMethod = handoff.template
-      ? allMethods.find(
-          (m: AuthMethod) =>
-            m.kind === "oauth" &&
-            (m.id === handoff.template || String(m.template) === handoff.template),
-        )
-      : allMethods.find((m: AuthMethod) => m.kind === "oauth");
-    if (!client || !clientOwner || !connectionOwner || !connectionName || !oauthMethod) return;
-
-    oauthReconnectOpenedKey.current = handoff.key;
-    setMethodId(oauthMethod.id);
-    void oauthPopup.start({
-      payload: {
-        client: OAuthClientSlug.make(client),
-        clientOwner,
-        owner: connectionOwner,
-        name: ConnectionName.make(connectionName),
-        integration,
-        template: oauthMethod.template,
-        ...(handoff.identityLabel !== undefined ? { identityLabel: handoff.identityLabel } : {}),
-      },
-      onAuthorizationStarted: () => {
-        trackEvent("connection_reconnected", {
-          integration_slug: String(integration),
-          owner: connectionOwner,
-          success: true,
-        });
-      },
-      onError: () => {
-        trackEvent("connection_reconnected", {
-          integration_slug: String(integration),
-          owner: connectionOwner,
-          success: false,
-        });
-      },
-      onSuccess: () => {
-        toast.success("Reconnected");
-        close();
-      },
-    });
-  }, [initialState, allMethods, integration, oauthPopup, close]);
-
-  const probeAndAutoNameOAuthConnection = async (
-    connection: OAuthCompletionPayload,
-    typedLabel: string,
-    defaultIdentityLabel: string,
-  ): Promise<void> => {
-    const check = await doCheckConnectionHealth({
-      params: {
-        owner: connection.owner,
-        integration: connection.integration,
-        name: connection.name,
-      },
-      query: {},
-      reactivityKeys: connectionCheckKeys,
-    });
-    if (Exit.isFailure(check)) return;
-    const nextIdentityLabel = oauthIdentityLabelFromHealth({
-      result: check.value,
-      typedLabel,
-      storedIdentityLabel: connection.identityLabel,
-      defaultIdentityLabel,
-    });
-    if (nextIdentityLabel === null) return;
-    const updated = await doUpdateConnection({
-      params: {
-        owner: connection.owner,
-        integration: connection.integration,
-        name: connection.name,
-      },
-      payload: { identityLabel: nextIdentityLabel },
-      reactivityKeys: connectionWriteKeys,
-    });
-    if (Exit.isFailure(updated)) {
-      toast.error(messageFromExit(updated, "Couldn't update connection name"));
-    }
-  };
+  // Stable identity: the reconnect effect below reaches this through
+  // `startAutomaticOAuthConnect`, so an identity that changed every render
+  // would re-run that effect on every keystroke.
+  const probeAndAutoNameOAuthConnection = useCallback(
+    async (connection: OAuthCompletionPayload, typedLabel: string): Promise<void> => {
+      const check = await doCheckConnectionHealth({
+        params: {
+          owner: connection.owner,
+          integration: connection.integration,
+          name: connection.name,
+        },
+        query: {},
+        reactivityKeys: connectionCheckKeys,
+      });
+      if (Exit.isFailure(check)) return;
+      const nextIdentityLabel = oauthIdentityLabelFromHealth({
+        result: check.value,
+        typedLabel,
+        storedIdentityLabel: connection.identityLabel,
+      });
+      if (nextIdentityLabel === null) return;
+      const updated = await doUpdateConnection({
+        params: {
+          owner: connection.owner,
+          integration: connection.integration,
+          name: connection.name,
+        },
+        payload: { identityLabel: nextIdentityLabel },
+        reactivityKeys: connectionWriteKeys,
+      });
+      if (Exit.isFailure(updated)) {
+        toast.error(messageFromExit(updated, "Couldn't update connection name"));
+      }
+    },
+    [doCheckConnectionHealth, doUpdateConnection],
+  );
 
   const credentialPayloadOrigin = createCredentialPayloadOrigin({
     origin: credentialOrigin,
@@ -1751,7 +2065,16 @@ function AddAccountModalView(props: AddAccountModalProps) {
     });
     if (Exit.isFailure(exit)) {
       setSubmitting(false);
-      toast.error(messageFromExit(exit, "Failed to add connection"));
+      // The conflict error's message is a getter derived from its fields, so
+      // it doesn't survive the wire — rebuild it from the tag (the same
+      // pattern as isIntegrationAlreadyExistsExit).
+      toast.error(
+        isConnectionAlreadyExistsExit(exit)
+          ? connectionExistsMessage(
+              connectionLabelForHost(label, owner, integrationName, organizationId),
+            )
+          : messageFromExit(exit, "Failed to add connection"),
+      );
       return;
     }
     toast.success("Connection added");
@@ -1767,13 +2090,9 @@ function AddAccountModalView(props: AddAccountModalProps) {
     if (continueError !== null) setContinueError(null);
   };
 
-  // Check the key works: probe the pasted credential WITHOUT saving the
-  // connection. When the integration has a configured health check we run it;
-  // otherwise we run the inline-picked candidate and, if it comes back healthy,
-  // save it as the integration's health check (so it's configured "then").
-  // Probe the pasted credential WITHOUT saving the connection. With a
-  // configured check the panel's Check runs this directly; with none it runs
-  // via handleCandidateProbe, which drafts a spec from the picked candidate.
+  // Probe the pasted credential without saving the connection. A configured
+  // health check runs directly; otherwise the picked candidate supplies a
+  // draft spec and becomes the integration's health check when it succeeds.
   const handleValidate = async (draftSpec?: HealthCheckSpec) => {
     const payloadOrigin = createCredentialPayloadOrigin({
       origin: credentialOrigin,
@@ -1782,7 +2101,7 @@ function AddAccountModalView(props: AddAccountModalProps) {
       onePasswordItemId,
       singleInput,
     });
-    if (!method || payloadOrigin === null || validating) return;
+    if (!method || payloadOrigin === null || validating) return null;
     setValidating(true);
     const exit = await doValidate({
       payload: {
@@ -1799,7 +2118,7 @@ function AddAccountModalView(props: AddAccountModalProps) {
     if (Exit.isFailure(exit)) {
       setValidationResult(null);
       toast.error(messageFromExit(exit, "Couldn't check the key"));
-      return;
+      return null;
     }
     const result = exit.value;
     setValidationResult(result);
@@ -1833,19 +2152,56 @@ function AddAccountModalView(props: AddAccountModalProps) {
         return probedIdentity;
       });
     }
+    return result;
+  };
+
+  const candidateHealthSpec = (): HealthCheckSpec | null => {
+    if (!hcCandidateReady) return null;
+    const argEntries = Object.entries(hcArgs)
+      .map(([key, value]) => [key, value.trim()] as const)
+      .filter(([, value]) => value.length > 0);
+    return {
+      operation: hcOperation,
+      ...(argEntries.length > 0 ? { args: Object.fromEntries(argEntries) } : {}),
+    };
   };
 
   // No configured check: build a draft spec from the picked candidate and
   // probe with it.
   const handleCandidateProbe = async () => {
-    if (!hcCandidateReady) return;
-    const argEntries = Object.entries(hcArgs)
-      .map(([key, value]) => [key, value.trim()] as const)
-      .filter(([, value]) => value.length > 0);
-    await handleValidate({
-      operation: hcOperation,
-      ...(argEntries.length > 0 ? { args: Object.fromEntries(argEntries) } : {}),
-    });
+    const spec = candidateHealthSpec();
+    if (spec) await handleValidate(spec);
+  };
+
+  // Continue probes the key, but only a DEFINITIVE rejection (the upstream
+  // answered 401/403 → "expired") blocks the step. An inconclusive probe —
+  // upstream unreachable, no runnable check, the probe call itself failing —
+  // advances: the pasted key may be perfectly valid, and stranding the user on
+  // an upstream outage would make the wizard depend on availability, not
+  // credential correctness.
+  const handleContinue = async () => {
+    if (credentialPayloadOrigin === null) {
+      setContinueError(singleInput ? "Enter the key first" : "Fill in every credential field");
+      return;
+    }
+
+    if (canCheckKey) {
+      const result =
+        validationResult?.status === "healthy"
+          ? validationResult
+          : hasHealthCheck
+            ? await handleValidate()
+            : await handleValidate(candidateHealthSpec() ?? undefined);
+      if (result?.status === "expired") {
+        setContinueError(
+          result.detail ?? "Check the credential and resolve the connection error to continue.",
+        );
+        return;
+      }
+    }
+
+    setContinueError(null);
+    setWizardStep("place");
   };
 
   // The user clicked a field in the probe's response: that field IS the
@@ -1881,20 +2237,21 @@ function AddAccountModalView(props: AddAccountModalProps) {
     // backend resolves the app own→shared from the slug, so the payload carries
     // only the host-resolved connection owner.
     const connectionOwner = oauthConnectionOwner;
-    const identityLabel = connectionLabelForHost(
-      label,
-      connectionOwner,
-      integrationName,
-      organizationId,
-    );
+    // Untyped connects carry NO identity label: the server fills it from the
+    // provider's OIDC claims (the account email), and the fallback probe below
+    // covers providers without an id_token. Sending the "<owner> <integration>"
+    // default here would both bury the real account identity and clobber a
+    // curated label on a same-name reconnect.
+    const identityLabel = typedIdentityLabel(label);
     const payload = {
       client: chosenClient.slug,
       clientOwner: chosenClient.owner,
       owner: connectionOwner,
-      name: connectionNameFrom(label, connectionOwner, integrationName, organizationId),
+      name: previewConnectionName(label, connectionOwner),
+      newConnection: true,
       integration,
       template: method.template,
-      identityLabel,
+      ...(identityLabel !== undefined ? { identityLabel } : {}),
     };
     // client_credentials mints inline (no redirect); authorization_code runs the popup.
     if (chosenClient.grant === "client_credentials") {
@@ -1915,7 +2272,7 @@ function AddAccountModalView(props: AddAccountModalProps) {
         return;
       }
       if (exit.value.status === "connected") {
-        await probeAndAutoNameOAuthConnection(exit.value.connection, label, identityLabel);
+        await probeAndAutoNameOAuthConnection(exit.value.connection, label);
       }
       setCcBusy(false);
       toast.success("Connection added");
@@ -1948,12 +2305,34 @@ function AddAccountModalView(props: AddAccountModalProps) {
         });
       },
       onSuccess: async (connection: OAuthCompletionPayload) => {
-        await probeAndAutoNameOAuthConnection(connection, label, identityLabel);
+        await probeAndAutoNameOAuthConnection(connection, label);
         toast.success("Connection added");
         close();
       },
     });
   };
+
+  // Stable identity for the same reason as probeAndAutoNameOAuthConnection.
+  const createCimdClient = useCallback(
+    async (args: CimdCreateClientArgs): Promise<OAuthClientSlug | null> => {
+      const exit = await doCreateOAuthClient({
+        payload: {
+          owner: args.owner,
+          slug: args.slug,
+          authorizationUrl: args.authorizationUrl,
+          tokenUrl: args.tokenUrl,
+          resource: args.resource ?? null,
+          grant: args.grant,
+          clientId: args.clientId,
+          clientSecret: args.clientSecret,
+        },
+        reactivityKeys: oauthClientWriteKeys,
+      });
+      if (Exit.isFailure(exit)) return null;
+      return exit.value.client;
+    },
+    [doCreateOAuthClient],
+  );
 
   const handleCimdConnect = async () => {
     const authorizationUrl = method?.oauth?.authorizationUrl;
@@ -1963,30 +2342,17 @@ function AddAccountModalView(props: AddAccountModalProps) {
       return;
     }
     const cimdOwner = owner;
-    const connectionName = connectionNameFrom(label, cimdOwner, integrationName, organizationId);
-    const identityLabel = connectionLabelForHost(label, cimdOwner, integrationName, organizationId);
+    const connectionName = previewConnectionName(label, cimdOwner);
+    const identityLabel = typedIdentityLabel(label);
     setCimdBusy(true);
     const outcome = await runCimdConnect(
       {
-        createClient: async (args: CimdCreateClientArgs): Promise<OAuthClientSlug | null> => {
-          const exit = await doCreateOAuthClient({
-            payload: {
-              owner: args.owner,
-              slug: args.slug,
-              authorizationUrl: args.authorizationUrl,
-              tokenUrl: args.tokenUrl,
-              resource: args.resource ?? null,
-              grant: args.grant,
-              clientId: args.clientId,
-              clientSecret: args.clientSecret,
-            },
-            reactivityKeys: oauthClientWriteKeys,
-          });
-          if (Exit.isFailure(exit)) return null;
-          return exit.value.client;
-        },
-        start: (args: { readonly client: OAuthClientSlug; readonly owner: Owner }): void => {
+        reserve: oauthPopup.reserve,
+        release: oauthPopup.releaseReservation,
+        createClient: createCimdClient,
+        start: (args: CimdStartArgs): void => {
           void oauthPopup.start({
+            reservation: args.reservation,
             payload: {
               client: args.client,
               // CIMD creates the public client under the connection owner, so
@@ -1996,10 +2362,11 @@ function AddAccountModalView(props: AddAccountModalProps) {
               name: connectionName,
               integration,
               template: method.template,
-              identityLabel,
+              newConnection: true,
+              ...(identityLabel !== undefined ? { identityLabel } : {}),
             },
             onSuccess: async (connection: OAuthCompletionPayload) => {
-              await probeAndAutoNameOAuthConnection(connection, label, identityLabel);
+              await probeAndAutoNameOAuthConnection(connection, label);
               toast.success("Connection added");
               close();
             },
@@ -2028,120 +2395,306 @@ function AddAccountModalView(props: AddAccountModalProps) {
     }
   };
 
-  // Transparent DCR connect: probe → register → start, no app picker. On any
-  // failure (probe error, no registration endpoint, or registration failure) we
-  // flip `dcrFailed` so the bring-your-own-app picker renders as the recovery
-  // path with name/owner kept.
-  const handleDcrConnect = async () => {
-    const discoveryUrl = method?.oauth?.discoveryUrl ?? method?.oauth?.tokenUrl;
-    if (!method || !discoveryUrl) {
+  // Whether this view is still mounted. Closing the modal unmounts it (see
+  // `AddAccountModal`), and the automatic connect sequence below polls this
+  // between its awaited round trips so a close mid-flight aborts instead of
+  // registering a client / launching the popup into a dead surface. The ref is
+  // re-armed in the effect body so a StrictMode remount stays active.
+  const viewMountedRef = useRef(true);
+  useEffect(() => {
+    viewMountedRef.current = true;
+    return () => {
+      viewMountedRef.current = false;
+    };
+  }, []);
+
+  // Automatic discovered OAuth: probe once, then prefer CIMD or use DCR
+  // according to the authorization server's advertised metadata. On failure we
+  // flip `dcrFailed` so the bring-your-own-app picker remains the recovery path.
+  //
+  // Reconnect runs through here too, and must (issue #1542): a DCR client is
+  // bound to the redirect URI it registered with, so once the app's callback
+  // origin moves (127.0.0.1 -> localhost) re-authorizing against the STORED
+  // client fails at the authorization server. Re-probing and re-registering is
+  // what replaces that stranded client, and it is exactly what the connect path
+  // already does — so both take one route rather than two that drift.
+  const startAutomaticOAuthConnect = useCallback(
+    async (request: AutomaticOAuthConnectRequest): Promise<void> => {
+      const { method: requestMethod, owner: dcrOwner, mode } = request;
+      const reconnect = mode === "reconnect";
+      const discoveryUrl = requestMethod.oauth?.discoveryUrl ?? requestMethod.oauth?.tokenUrl;
+      if (!discoveryUrl) {
+        setDcrFailed(true);
+        return;
+      }
+      setDcrBusy(true);
+      const outcome = await runAutomaticOAuthConnect(
+        {
+          reserve: oauthPopup.reserve,
+          release: oauthPopup.releaseReservation,
+          // Closing the modal genuinely unmounts this view (see
+          // `AddAccountModal`), so "still mounted" is exactly "still open".
+          // The sequence checks it between round trips: a close mid-flight
+          // must not register a client or launch the popup afterwards.
+          isActive: () => viewMountedRef.current,
+          probe: async (url: string): Promise<OAuthProbeResult | null> => {
+            const exit = await doProbe({ payload: { url }, reactivityKeys: [] });
+            if (Exit.isFailure(exit)) return null;
+            return exit.value;
+          },
+          createCimdClient,
+          register: async (
+            args: DcrRegisterArgs,
+          ): Promise<OAuthClientSlug | { readonly error: string } | null> => {
+            const exit = await doRegisterDynamic({
+              payload: {
+                owner: args.owner,
+                slug: args.slug,
+                issuer: args.issuer ?? null,
+                registrationEndpoint: args.registrationEndpoint,
+                authorizationUrl: args.authorizationUrl,
+                tokenUrl: args.tokenUrl,
+                resource: args.resource ?? null,
+                scopes: args.scopes,
+                tokenEndpointAuthMethodsSupported: args.tokenEndpointAuthMethodsSupported,
+                clientName: args.clientName,
+                redirectUri: args.redirectUri,
+                originIntegration: args.originIntegration,
+              },
+              reactivityKeys: oauthClientWriteKeys,
+            });
+            if (Exit.isFailure(exit)) {
+              return {
+                error: messageFromExit(
+                  exit,
+                  "Automatic setup unavailable. Register an app instead.",
+                ),
+              };
+            }
+            return exit.value.client;
+          },
+          start: (args: DcrStartArgs): void => {
+            void oauthPopup.start({
+              reservation: args.reservation,
+              payload: {
+                client: args.client,
+                // DCR/CIMD mints the client under the connection owner, so the
+                // app and connection share one owner.
+                clientOwner: args.owner,
+                owner: dcrOwner,
+                name: request.connectionName,
+                integration,
+                template: requestMethod.template,
+                ...(reconnect ? {} : { newConnection: true }),
+                ...(request.identityLabel !== undefined
+                  ? { identityLabel: request.identityLabel }
+                  : {}),
+              },
+              ...(reconnect
+                ? {
+                    onAuthorizationStarted: () => {
+                      trackEvent("connection_reconnected", {
+                        integration_slug: String(integration),
+                        owner: dcrOwner,
+                        success: true,
+                      });
+                    },
+                    onError: () => {
+                      trackEvent("connection_reconnected", {
+                        integration_slug: String(integration),
+                        owner: dcrOwner,
+                        success: false,
+                      });
+                    },
+                  }
+                : {}),
+              onSuccess: async (connection: OAuthCompletionPayload) => {
+                // A reconnect keeps the connection's existing name; only a new
+                // connection gets auto-named from what was probed.
+                if (!reconnect) {
+                  await probeAndAutoNameOAuthConnection(connection, request.typedLabel);
+                }
+                toast.success(reconnect ? "Reconnected" : "Connection added");
+                close();
+              },
+            });
+          },
+        },
+        {
+          discoveryUrl,
+          // Only a genuine discovery URL (MCP) seeds the RFC 8707 resource
+          // indicator; the token-endpoint fallback baked into `discoveryUrl` must
+          // not, so pass the un-collapsed method value here.
+          resourceFallback: requestMethod.oauth?.discoveryUrl,
+          owner: dcrOwner,
+          // DCR slugs are server-keyed (Part A): the connect path no longer depends
+          // on the picker's app list, so it need not be threaded here.
+          declaredScopes: requestMethod.oauth?.scopes,
+          redirectUri: oauthCallbackUrl(),
+          integration,
+          cimd: {
+            integrationName,
+            clientIdMetadataDocumentUrl: oauthClientIdMetadataDocumentUrl(),
+            existingClients: clientSummaries,
+          },
+          ...(request.storedResource !== undefined
+            ? { storedResource: request.storedResource }
+            : {}),
+        },
+      );
+      // The modal closed mid-flight: this view is unmounted, so no state may
+      // be written at all — not the fallback below, and not even the busy
+      // flag, which belongs to the surface that is gone.
+      if (outcome.kind === "aborted") return;
+      setDcrBusy(false);
+      // `connection_oauth_started` measures the connect funnel; a reconnect
+      // reports through `connection_reconnected` on the popup callbacks above,
+      // so it must not also land here.
+      if (!reconnect) {
+        trackEvent("connection_oauth_started", {
+          integration_slug: String(integration),
+          owner: dcrOwner,
+          flow:
+            outcome.kind === "started"
+              ? outcome.flow
+              : "probe" in outcome && outcome.probe.clientIdMetadataDocumentSupported === true
+                ? "cimd"
+                : "dcr",
+          success: outcome.kind === "started",
+          ...(outcome.kind === "fallback" ? { dcr_fallback: true } : {}),
+        });
+      }
+      // Deliberately absent: a "popup-blocked" branch. Registering an app by hand
+      // does not make the browser open a window, so dropping to the BYO picker
+      // would send the user down a path that cannot succeed either. `reserve`
+      // already put the reason in `oauthPopup.error`, which the footer renders.
+      if (outcome.kind === "fallback") {
+        setOAuthFallbackProbe("probe" in outcome ? outcome.probe : null);
+        setDcrFailed(true);
+        // Surface the server's actionable rejection reason on the recovery view as
+        // an inline error card. Generic fallbacks (no message) fall through to the
+        // "register an app" empty state, which already guides the user.
+        setDcrFallbackMessage("message" in outcome ? (outcome.message ?? null) : null);
+      }
+    },
+    [
+      close,
+      clientSummaries,
+      createCimdClient,
+      doProbe,
+      doRegisterDynamic,
+      integration,
+      integrationName,
+      oauthPopup,
+      probeAndAutoNameOAuthConnection,
+    ],
+  );
+
+  const handleAutomaticOAuthConnect = async () => {
+    if (!method) {
       setDcrFailed(true);
       return;
     }
-    const dcrOwner = owner;
-    const connectionName = connectionNameFrom(label, dcrOwner, integrationName, organizationId);
-    const identityLabel = connectionLabelForHost(label, dcrOwner, integrationName, organizationId);
-    setDcrBusy(true);
-    const outcome = await runDcrConnect(
-      {
-        probe: async (url: string): Promise<DcrProbeResult | null> => {
-          const exit = await doProbe({ payload: { url }, reactivityKeys: [] });
-          if (Exit.isFailure(exit)) return null;
-          return exit.value;
-        },
-        register: async (
-          args: DcrRegisterArgs,
-        ): Promise<OAuthClientSlug | { readonly error: string } | null> => {
-          const exit = await doRegisterDynamic({
-            payload: {
-              owner: args.owner,
-              slug: args.slug,
-              issuer: args.issuer ?? null,
-              registrationEndpoint: args.registrationEndpoint,
-              authorizationUrl: args.authorizationUrl,
-              tokenUrl: args.tokenUrl,
-              resource: args.resource ?? null,
-              scopes: args.scopes,
-              tokenEndpointAuthMethodsSupported: args.tokenEndpointAuthMethodsSupported,
-              clientName: args.clientName,
-              redirectUri: args.redirectUri,
-              originIntegration: args.originIntegration,
-            },
-            reactivityKeys: oauthClientWriteKeys,
-          });
-          if (Exit.isFailure(exit)) {
-            return {
-              error: messageFromExit(exit, "Automatic setup unavailable. Register an app instead."),
-            };
-          }
-          return exit.value.client;
-        },
-        start: (args: DcrStartArgs): void => {
-          void oauthPopup.start({
-            payload: {
-              client: args.client,
-              // DCR registers the client under the connection owner, so the app
-              // and connection share one owner.
-              clientOwner: args.owner,
-              owner: args.owner,
-              name: connectionName,
-              integration,
-              template: method.template,
-              identityLabel,
-            },
-            onSuccess: async (connection: OAuthCompletionPayload) => {
-              await probeAndAutoNameOAuthConnection(connection, label, identityLabel);
-              toast.success("Connection added");
-              close();
-            },
-          });
-        },
-      },
-      {
-        discoveryUrl,
-        // Only a genuine discovery URL (MCP) seeds the RFC 8707 resource
-        // indicator; the token-endpoint fallback baked into `discoveryUrl` must
-        // not, so pass the un-collapsed method value here.
-        resourceFallback: method.oauth?.discoveryUrl,
-        owner: dcrOwner,
-        // DCR slugs are server-keyed (Part A): the connect path no longer depends
-        // on the picker's app list, so it need not be threaded here.
-        declaredScopes: method.oauth?.scopes,
-        redirectUri: oauthCallbackUrl(),
-        integration,
-      },
-    );
-    setDcrBusy(false);
-    trackEvent("connection_oauth_started", {
-      integration_slug: String(integration),
-      owner: dcrOwner,
-      flow: "dcr",
-      success: outcome.kind === "started",
-      ...(outcome.kind === "fallback" ? { dcr_fallback: true } : {}),
+    await startAutomaticOAuthConnect({
+      method,
+      owner,
+      connectionName: previewConnectionName(label, owner),
+      identityLabel: typedIdentityLabel(label),
+      typedLabel: label,
+      mode: "connect",
     });
-    if (outcome.kind === "fallback") {
-      setOAuthFallbackProbe("probe" in outcome ? outcome.probe : null);
-      setDcrFailed(true);
-      // Surface the server's actionable rejection reason on the recovery view as
-      // an inline error card. Generic fallbacks (no message) fall through to the
-      // "register an app" empty state, which already guides the user.
-      setDcrFallbackMessage("message" in outcome ? (outcome.message ?? null) : null);
-    }
   };
+
+  // The reconnect handoff: a connection asked to be re-authorized, so open its
+  // OAuth flow immediately. Fires once per handoff key (tracked by ref), which
+  // is also what makes a re-render mid-flight harmless.
+  //
+  // Routing follows the STORED binding, not just the method: only a handoff
+  // whose stored client is auto-minted DCR (vetted by the accounts section,
+  // `dynamicRegistration: true`) re-runs the automatic path — see
+  // `startAutomaticOAuthConnect`. Everything else (static/BYO, first-party)
+  // has a fixed, registered app, so it starts the popup against that client
+  // directly and is never rebound to an automatic one.
+  useEffect(() => {
+    const handoff = initialState;
+    const oauthClient = handoff?.oauthClient;
+    if (!handoff || oauthClient?.action !== "reconnect") return;
+    if (oauthReconnectOpenedKey.current === handoff.key) return;
+    const client = oauthClient.slug;
+    const clientOwner = oauthClient.owner ?? handoff.owner;
+    const connectionOwner = handoff.owner;
+    const connectionName = handoff.label;
+    const oauthMethod = handoff.template
+      ? allMethods.find(
+          (m: AuthMethod) =>
+            m.kind === "oauth" &&
+            (m.id === handoff.template || String(m.template) === handoff.template),
+        )
+      : allMethods.find((m: AuthMethod) => m.kind === "oauth");
+    if (!client || !clientOwner || !connectionOwner || !connectionName || !oauthMethod) return;
+
+    oauthReconnectOpenedKey.current = handoff.key;
+    setMethodId(oauthMethod.id);
+
+    // The accounts section vetted the STORED binding as auto-minted DCR
+    // (`dynamicRegistration: true`), and that alone routes: the automatic
+    // flow probes the method's token URL even when it declares no
+    // discovery/DCR capability, whereas the direct path below would dead-end
+    // an origin-drifted DCR client (#1542).
+    if (oauthClient.dynamicRegistration === true) {
+      void startAutomaticOAuthConnect({
+        method: oauthMethod,
+        owner: connectionOwner,
+        connectionName: ConnectionName.make(connectionName),
+        identityLabel: handoff.identityLabel,
+        typedLabel: connectionName,
+        mode: "reconnect",
+        ...(oauthClient.resource !== undefined ? { storedResource: oauthClient.resource } : {}),
+      });
+      return;
+    }
+
+    void oauthPopup.start({
+      payload: {
+        client: OAuthClientSlug.make(client),
+        clientOwner,
+        owner: connectionOwner,
+        name: ConnectionName.make(connectionName),
+        integration,
+        template: oauthMethod.template,
+        ...(handoff.identityLabel !== undefined ? { identityLabel: handoff.identityLabel } : {}),
+      },
+      onAuthorizationStarted: () => {
+        trackEvent("connection_reconnected", {
+          integration_slug: String(integration),
+          owner: connectionOwner,
+          success: true,
+        });
+      },
+      onError: () => {
+        trackEvent("connection_reconnected", {
+          integration_slug: String(integration),
+          owner: connectionOwner,
+          success: false,
+        });
+      },
+      onSuccess: () => {
+        toast.success("Reconnected");
+        close();
+      },
+    });
+  }, [initialState, allMethods, integration, oauthPopup, close, startAutomaticOAuthConnect]);
 
   return (
     // Non-modal for the same reason as the health-check editor sheet: a modal
     // dialog's react-remove-scroll locks the wheel to the dialog subtree, so
     // the operation combobox's PORTALED popup (and the modal body while it is
-    // open) cannot scroll. The overlay still dims and outside-click still
-    // closes; the portaled-popup guard in DialogContent keeps option clicks
-    // from dismissing.
+    // open) cannot scroll. The overlay still dims, so the dialog keeps its
+    // modal look. This form holds credentials and a half-built auth method, so
+    // it takes DialogContent's default: an outside click does not dismiss it.
     <Dialog open={open} onOpenChange={onOpenChange} modal={false}>
       <DialogContent
         forceOverlay
-        onInteractOutside={
-          oauthClientHandoff?.action === "reconnect" ? (event) => event.preventDefault() : undefined
-        }
         className={cn(
           "max-h-[85vh] overflow-x-hidden overflow-y-auto",
           (addingMethod && createCustomMethod) || oauthRegistering || oauthEditing
@@ -2193,6 +2746,7 @@ function AddAccountModalView(props: AddAccountModalProps) {
                   resource: editingClient.resource ?? null,
                   grant: editingClient.grant,
                   clientId: editingClient.clientId,
+                  tokenEndpointAuthMethod: editingClient.tokenEndpointAuthMethod,
                 }}
                 onCreated={() => setEditingClient(null)}
                 onCancel={() => setEditingClient(null)}
@@ -2274,7 +2828,9 @@ function AddAccountModalView(props: AddAccountModalProps) {
               </DialogTitle>
               <DialogDescription>
                 {ownerDisplay.showOwnerLabels
-                  ? "A connection is a saved way to use this integration, owned by you or the workspace."
+                  ? canCreateWorkspaceConnections
+                    ? "A connection is a saved way to use this integration, owned by you or the workspace."
+                    : "A connection is a saved way to use this integration, owned by you."
                   : "A connection is a saved way to use this integration."}
               </DialogDescription>
             </DialogHeader>
@@ -2370,6 +2926,15 @@ function AddAccountModalView(props: AddAccountModalProps) {
                         <div className="space-y-2">
                           <StepHeader index={1} label={authStepLabel} />
 
+                          {/* What this key is called at the provider, the page
+                              that mints it, and their own setup steps. The
+                              question this dialog used to ask without
+                              answering. */}
+                          <CredentialGuidancePanel
+                            displayUrl={integrationDisplayUrl}
+                            methodKind={method?.kind}
+                          />
+
                           {isOAuth && method ? (
                             cimdActive ? (
                               <div className="space-y-2 rounded-lg border border-ring/40 bg-accent/30 px-3 py-3">
@@ -2378,17 +2943,6 @@ function AddAccountModalView(props: AddAccountModalProps) {
                                   {cimdConnecting
                                     ? `Connecting to ${integrationName}…`
                                     : `${integrationName} supports Client ID Metadata Document OAuth. We'll use this Executor host's public client metadata document and sign you in.`}
-                                </p>
-                              </div>
-                            ) : dcrActive ? (
-                              // Transparent DCR: no picker. We register an app for you and run
-                              // the OAuth flow with a single Connect click.
-                              <div className="space-y-2 rounded-lg border border-ring/40 bg-accent/30 px-3 py-3">
-                                <p className="text-sm font-medium">No app to choose</p>
-                                <p className="text-xs text-muted-foreground">
-                                  {dcrConnecting
-                                    ? `Connecting to ${integrationName}…`
-                                    : `${integrationName} supports automatic setup. We register an app for you and sign you in — no client ID or app to pick.`}
                                 </p>
                               </div>
                             ) : oauthLoading ? (
@@ -2622,9 +3176,6 @@ function AddAccountModalView(props: AddAccountModalProps) {
                               />
                             </div>
                           )}
-                          {isOAuth && oauthPopup.error ? (
-                            <p className="text-xs text-destructive">{oauthPopup.error}</p>
-                          ) : null}
                         </div>
                       )}
                     </TabsContent>
@@ -2699,7 +3250,9 @@ function AddAccountModalView(props: AddAccountModalProps) {
                     hint={
                       nameOptions.length > 0
                         ? "from the account your key returned, or type your own"
-                        : "how you'll tell accounts apart"
+                        : isOAuth
+                          ? "detected from the account you sign in with, or type your own"
+                          : "how you'll tell accounts apart"
                     }
                     htmlFor="connection-name"
                   />
@@ -2729,12 +3282,11 @@ function AddAccountModalView(props: AddAccountModalProps) {
                   ) : (
                     <Input
                       id="connection-name"
-                      placeholder={connectionLabelForHost(
-                        "",
-                        owner,
-                        integrationName,
-                        organizationId,
-                      )}
+                      placeholder={
+                        isOAuth
+                          ? "you@example.com"
+                          : connectionLabelForHost("", owner, integrationName, organizationId)
+                      }
                       value={label}
                       onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                         setLabel(e.target.value);
@@ -2768,11 +3320,36 @@ function AddAccountModalView(props: AddAccountModalProps) {
                   />
                 </div>
               )}
+
+              {isBuiltInGoogleClient && showPlaceStep ? (
+                <p className="rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                  Executor uses the Google data you authorize only to perform the actions you
+                  request. Read the{` `}
+                  <a
+                    href="https://executor.sh/privacy"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-medium text-foreground underline underline-offset-2"
+                  >
+                    privacy policy
+                  </a>
+                  .
+                </p>
+              ) : null}
             </div>
 
             {continueError ? (
               <p role="alert" className="px-1 text-xs text-destructive">
                 {continueError}
+              </p>
+            ) : null}
+            {/* Above the footer, not inside the method tab: the automatic
+                (CIMD/DCR) flows render no tab panel at all, and putting the
+                sign-in error in there left a blocked popup with nothing on
+                screen but the button returning to "Connect". */}
+            {isOAuth && oauthPopup.error ? (
+              <p role="alert" className="px-1 text-xs text-destructive">
+                {oauthPopup.error}
               </p>
             ) : null}
             <DialogFooter>
@@ -2803,7 +3380,7 @@ function AddAccountModalView(props: AddAccountModalProps) {
               ) : dcrActive ? (
                 <Button
                   type="button"
-                  onClick={() => void handleDcrConnect()}
+                  onClick={() => void handleAutomaticOAuthConnect()}
                   disabled={dcrConnecting}
                 >
                   {dcrConnecting ? "Connecting…" : "Connect"}
@@ -2821,20 +3398,7 @@ function AddAccountModalView(props: AddAccountModalProps) {
                       : "Connect with OAuth"}
                 </Button>
               ) : wizardActive && wizardStep === "validate" ? (
-                <Button
-                  type="button"
-                  onClick={() => {
-                    if (credentialPayloadOrigin === null) {
-                      setContinueError(
-                        singleInput ? "Enter the key first" : "Fill in every credential field",
-                      );
-                      return;
-                    }
-                    setContinueError(null);
-                    setWizardStep("place");
-                  }}
-                  loading={validating}
-                >
+                <Button type="button" onClick={() => void handleContinue()} loading={validating}>
                   Continue
                 </Button>
               ) : (

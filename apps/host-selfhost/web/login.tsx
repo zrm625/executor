@@ -5,29 +5,27 @@ import { Input } from "@executor-js/react/components/input";
 import { Label } from "@executor-js/react/components/label";
 
 import { authClient } from "./auth-client";
+import { fetchSsoProviders, type SsoProvider } from "./auth-config";
 import { AuthLayout } from "./auth-layout";
-import { mcpAuthorizeResumeTarget, safeReturnTo } from "../src/auth/return-to";
+import { postLoginTarget } from "../src/auth/return-to";
 
 const EXTERNAL_OIDC_PROVIDER_ID = "external-oidc";
 
-// Self-host login: email + password sign-in via Better Auth. On success we
-// reload so the shared AuthProvider re-reads /account/me and the AuthGate swaps
-// in the app. (Cloud's equivalent is a WorkOS redirect — this is the
-// provider-specific piece injected into the shared shell.)
+// Self-host login: email + password sign-in via Better Auth, plus a provider
+// button per configured SSO provider (read from /api/auth-config). On
+// success we reload so the shared AuthProvider re-reads /account/me and the
+// AuthGate swaps in the app. (Cloud's equivalent is a WorkOS redirect — this is
+// the provider-specific piece injected into the shared shell.)
 //
 // There is no self-signup here: open registration is closed. New people join by
 // redeeming an invite — either the full /join/<code> link, or by entering the
 // code here ("Have an invite code?"), which forwards to the same join page.
 export const LoginPage = () => {
   const search = window.location.search;
-  // Where to go after sign-in: resume an interrupted MCP OAuth authorize if we
-  // arrived from one (Better Auth redirects it here with the OAuth params),
-  // otherwise honor a safe returnTo (e.g. an integration OAuth callback), else
-  // land on the dashboard.
-  const postLogin =
-    mcpAuthorizeResumeTarget(search) ??
-    safeReturnTo(new URLSearchParams(search).get("returnTo")) ??
-    "/";
+  // Where to go after sign-in. The gate renders this page IN PLACE of the
+  // requested route without navigating, so the live location is what carries a
+  // deep link (`/connect/linear`) across sign-in — see `postLoginTarget`.
+  const postLogin = postLoginTarget(window.location);
   const [mode, setMode] = useState<"signin" | "code" | "link">("signin");
   const [oidcEnabled, setOidcEnabled] = useState(false);
   const [email, setEmail] = useState("");
@@ -35,6 +33,17 @@ export const LoginPage = () => {
   const [code, setCode] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [ssoProviders, setSsoProviders] = useState<readonly SsoProvider[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchSsoProviders().then((providers) => {
+      if (!cancelled) setSsoProviders(providers);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -111,6 +120,22 @@ export const LoginPage = () => {
     window.location.href = postLogin;
   };
 
+  const signInWithSso = async (providerId: string) => {
+    setBusy(true);
+    setError(null);
+    // Better Auth redirects the browser to the IdP; on callback it lands on
+    // `callbackURL`, so the deep-link target survives the round trip the same
+    // way it does for the email form's post-login navigation.
+    const result = await authClient.signIn.oauth2({
+      providerId,
+      callbackURL: postLogin,
+    });
+    if (result.error) {
+      setBusy(false);
+      setError(result.error.message ?? "Sign in failed");
+    }
+  };
+
   const redeem = (event: FormEvent) => {
     event.preventDefault();
     const trimmed = code.trim();
@@ -170,6 +195,27 @@ export const LoginPage = () => {
             <Button type="submit" disabled={busy} className="w-full">
               {busy ? "…" : mode === "link" ? "Continue to identity provider" : "Sign in"}
             </Button>
+            {mode === "signin" && ssoProviders.length > 0 && (
+              <>
+                <div className="flex items-center gap-3">
+                  <div className="h-px flex-1 bg-border" />
+                  <span className="text-xs text-muted-foreground">or</span>
+                  <div className="h-px flex-1 bg-border" />
+                </div>
+                {ssoProviders.map((provider) => (
+                  <Button
+                    key={provider.id}
+                    type="button"
+                    variant="outline"
+                    disabled={busy}
+                    onClick={() => void signInWithSso(provider.id)}
+                    className="w-full"
+                  >
+                    Continue with {provider.name}
+                  </Button>
+                ))}
+              </>
+            )}
           </form>
         ) : (
           <form onSubmit={redeem} className="space-y-4">

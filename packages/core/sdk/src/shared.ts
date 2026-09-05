@@ -10,6 +10,7 @@
 
 // Branded ids + the owner literal.
 export {
+  ArtifactId,
   AuthTemplateSlug,
   ConnectionAddress,
   ConnectionName,
@@ -58,10 +59,13 @@ export {
   IntegrationNotFoundError,
   IntegrationAlreadyExistsError,
   IntegrationRemovalNotAllowedError,
+  OrgWriteDeniedError,
+  ConnectionAlreadyExistsError,
   ConnectionNotFoundError,
   InvalidConnectionInputError,
   CredentialProviderNotRegisteredError,
   CredentialResolutionError,
+  ArtifactNotFoundError,
   isUserActionableError,
   type ExecuteError,
   type ExecutorError,
@@ -70,6 +74,7 @@ export {
 
 // Elicitation wire schemas.
 export {
+  ElicitationMeta,
   FormElicitation,
   UrlElicitation,
   ElicitationAction,
@@ -101,6 +106,20 @@ export {
 } from "./policies";
 export type { ToolPolicyAction } from "./core-schema";
 
+// Artifact projections (the row mappers are server-side; the binding schemas
+// are shared, because the HTTP contract carries them).
+export { ArtifactBinding, ArtifactBindings } from "./artifact";
+export type {
+  Artifact,
+  ArtifactPreview,
+  ArtifactSummary,
+  SaveArtifactInput,
+  RenameArtifactInput,
+  RemoveArtifactInput,
+  SetArtifactPreviewInput,
+} from "./artifact";
+export { ARTIFACT_PREVIEW_MARKUP_LIMIT } from "./artifact-preview";
+
 // Schema-side views + onboarding autodetect.
 export { ToolSchemaView, IntegrationDetectionResult } from "./types";
 
@@ -113,11 +132,13 @@ export {
 // Health-check vocabulary (pure Schema + helpers).
 export {
   HealthStatus,
+  HealthCheckReason,
   HealthCheckSpec,
   HealthCheckResult,
   HealthCheckCandidate,
   HealthCheckCandidateParameter,
   classifyHttpStatus,
+  classifyProbeResponse,
   extractIdentity,
   compareHealthCheckCandidates,
   candidateIdentityTier,
@@ -128,6 +149,20 @@ export {
 
 // OAuth wire contracts (data + tagged errors; the flow impl is server-only).
 export {
+  FIRST_PARTY_OAUTH_CLIENT_PREFIX,
+  firstPartyOAuthClientSlug,
+  isFirstPartyOAuthClientSlug,
+  SubjectTokenTypeSchema,
+  DEFAULT_SUBJECT_TOKEN_TYPE,
+  EnterpriseManagedStartInputSchema,
+  EnterpriseIdentityProviderDescriptorSchema,
+  TokenEndpointAuthMethodSchema,
+  type SubjectTokenType,
+  type EnterpriseManagedStartInput,
+  type EnterpriseIdentityProviderDescriptor,
+  type TokenEndpointAuthMethod,
+  isTokenEndpointAuthMethod,
+  type FirstPartyOAuthClientConfig,
   type OAuthGrant,
   type OAuthAuthentication,
   type OAuthClient,
@@ -156,17 +191,22 @@ export {
   DEFAULT_EXECUTOR_SERVER_ORIGIN,
   DEFAULT_EXECUTOR_SERVER_USERNAME,
   EXECUTOR_ORG_SELECTOR_HEADER,
+  ExecutorServerHeaderResolutionError,
   apiBaseUrlForServerOrigin,
   getExecutorServerAuthorizationHeader,
   normalizeExecutorServerConnection,
   normalizeExecutorServerOrigin,
   originFromApiBaseUrl,
   parseExecutorLocalServerManifest,
+  resolveExecutorServerConfiguredHeaders,
+  resolveExecutorServerRequestHeaders,
   serializeExecutorLocalServerManifest,
   type ExecutorServerAuth,
   type ExecutorServerConnection,
   type ExecutorServerConnectionInput,
   type ExecutorServerConnectionKind,
+  type ExecutorServerHeaders,
+  type ExecutorServerHeaderValue,
   type ExecutorLocalServerKind,
   type ExecutorLocalServerManifest,
 } from "./server-connection";
@@ -177,3 +217,16 @@ export {
   type OAuthPopupResult,
   isOAuthPopupResult,
 } from "./oauth-popup-types";
+
+// URL redaction for exported telemetry (browser-safe — pure Effect). The
+// browser client provides the redacting OTLP serialization to its exporter so
+// page-side spans are scrubbed before they leave the page.
+export {
+  redactOtlpTraceExport,
+  redactSpanUrlAttributes,
+  redactUrlForTelemetry,
+  redactUrlsInText,
+  STRIPPED_QUERY_ATTRIBUTE,
+  UrlRedactingOtlpSerializationJson,
+  type RedactedUrl,
+} from "./telemetry-url-redaction";

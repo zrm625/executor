@@ -64,6 +64,9 @@ with PKCE S256 and `client_secret_basic`, and accepts identity only from the
 configured UserInfo endpoint with a stable subject and verified email. UserInfo
 must be HTTPS JSON, arrive within five seconds, and fit within 16 KiB;
 redirects, malformed or oversized claims, and unverified email fail closed.
+The separate `EXECUTOR_SSO_*` provider can coexist with external OIDC. Its
+verified-domain signup and verified-email linking behavior remains independent;
+`external-oidc` is reserved and cannot be used as its provider ID.
 After linking, either login method remains available. Raw ID tokens are not
 persisted; access and refresh tokens are encrypted at rest.
 

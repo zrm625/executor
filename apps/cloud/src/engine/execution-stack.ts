@@ -32,7 +32,7 @@
 //                            seams module; the decorator is composed on top.
 // ---------------------------------------------------------------------------
 
-import { env } from "cloudflare:workers";
+import { env, waitUntil } from "cloudflare:workers";
 import { Layer } from "effect";
 
 import {
@@ -43,11 +43,13 @@ import {
   collectTables,
 } from "@executor-js/api/server";
 import { makeDynamicWorkerExecutor } from "@executor-js/runtime-dynamic-worker";
-import type { AnyPlugin } from "@executor-js/sdk";
+import { type AnyPlugin } from "@executor-js/sdk";
 
 import executorConfig from "../../executor.config";
+import { cloudEnterpriseManagedRollout } from "../analytics/ema-rollout";
 import { DbService } from "../db/db";
 import { cloudDbProviderLayer } from "../db/fuma";
+import { firstPartyOAuthClientsFor } from "./first-party-oauth-clients";
 
 export { makeExecutionStack } from "@executor-js/api/server";
 
@@ -62,9 +64,6 @@ const cloudPluginFactory = executorConfig.plugins as (deps: {
     readonly apiUrl?: string;
   };
   readonly activeToolkitSlug?: string;
-  readonly allowLocalNetwork?: boolean;
-  readonly workerLoader?: WorkerLoader;
-  readonly workerAssets?: { readonly fetch: (request: Request) => Promise<Response> };
 }) => readonly AnyPlugin[];
 
 // Fresh plugin instances per request, carrying the Worker env's WorkOS Vault
@@ -79,9 +78,6 @@ export const CloudPluginsProvider: Layer.Layer<PluginsProvider> = Layer.succeed(
       },
       activeToolkitSlug:
         context?.mcpResource?.kind === "toolkit" ? context.mcpResource.slug : undefined,
-      allowLocalNetwork: env.ALLOW_LOCAL_NETWORK === "true",
-      workerLoader: env.LOADER,
-      workerAssets: env.ASSETS,
     }),
 });
 
@@ -105,6 +101,16 @@ export const CloudHostConfig: Layer.Layer<HostConfig> = Layer.sync(HostConfig, (
   // WorkOS Vault is cloud's credential storage implementation detail, not a
   // user-selectable provider surface.
   exposeCredentialProviders: false,
+  firstPartyOAuthClients: firstPartyOAuthClientsFor(env),
+  // Workers cancel request-scoped I/O once the response settles; the ambient
+  // `waitUntil` binds to the in-flight invocation (HTTP request or DO call),
+  // so stale tool-catalog rebuilds that outlive a read still converge.
+  waitUntil,
+  // Enterprise-managed authorization ships behind a PostHog flag. Cloud is the
+  // one host with a flag service, so cloud is the one host that installs a
+  // gate; everywhere else the seam stays empty and the profile is attempted as
+  // before. Gating happens at connect only — see the SDK contract.
+  enterpriseManagedRollout: cloudEnterpriseManagedRollout(),
 }));
 
 export const CloudCodeExecutorProvider: Layer.Layer<CodeExecutorProvider> = Layer.sync(

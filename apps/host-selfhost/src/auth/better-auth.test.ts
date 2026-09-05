@@ -7,6 +7,10 @@ import { afterAll, expect, test } from "@effect/vitest";
 import { mintInviteCode } from "../testing/mint-invite";
 
 // Real Better Auth path: set a secret + bootstrap admin before importing.
+// Better Auth skips origin checks in test mode by default; this suite exercises
+// the production check so the trusted-origin cases below cover the real path.
+process.env.NODE_ENV = "production";
+process.env.TEST = "false";
 process.env.EXECUTOR_DATA_DIR = mkdtempSync(join(tmpdir(), "eh-auth-"));
 process.env.BETTER_AUTH_SECRET = "test-secret-0123456789-abcdefghijklmnop-qrstuv";
 process.env.EXECUTOR_BOOTSTRAP_ADMIN_EMAIL = "admin@test.local";
@@ -19,6 +23,7 @@ process.env.EXECUTOR_OIDC_TOKEN_URL = "https://identity.example.test/oauth2/toke
 process.env.EXECUTOR_OIDC_USERINFO_URL = "https://identity.example.test/oauth2/userinfo";
 process.env.EXECUTOR_OIDC_CLIENT_ID = "executor-test";
 process.env.EXECUTOR_OIDC_CLIENT_SECRET = "A".repeat(64);
+process.env.EXECUTOR_TRUSTED_ORIGINS = "http://executor.home.arpa:4788";
 
 const { makeSelfHostApiHandler } = await import("../app");
 
@@ -104,6 +109,79 @@ test("OIDC account linking requires an existing local session", async () => {
   expect(authorization.searchParams.get("redirect_uri")).toBe(
     "https://executor.example.test/api/auth/oauth2/callback/external-oidc",
   );
+});
+
+test("an HTTP trusted alias receives a usable session cookie with an HTTPS canonical URL", async () => {
+  const alias = "http://executor.home.arpa:4788";
+  const signIn = await handler(
+    new Request(`${alias}/api/auth/sign-in/email`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: alias,
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+      },
+      body: JSON.stringify({
+        email: "admin@test.local",
+        password: "admin-password-123",
+      }),
+    }),
+  );
+  expect(signIn.status).toBe(200);
+  const sessionCookie = signIn.headers.get("set-cookie");
+  expect(sessionCookie).toContain("better-auth.session_token=");
+  expect(sessionCookie).not.toMatch(/(?:^|;\s*)Secure(?:;|$)/i);
+  expect(sessionCookie).not.toContain("__Secure-");
+});
+
+test("an explicitly trusted browser alias can sign up without changing the canonical base URL", async () => {
+  const alias = "http://executor.home.arpa:4788";
+  const inviteCode = await mintInviteCode(handler);
+  const signUp = await handler(
+    new Request(`${alias}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: alias,
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+      },
+      body: JSON.stringify({
+        email: "trusted-alias@test.local",
+        password: "member-password-123",
+        name: "Trusted Alias",
+        inviteCode,
+      }),
+    }),
+  );
+  expect(signUp.status).toBe(200);
+});
+
+test("an unlisted browser alias remains blocked", async () => {
+  const alias = "http://untrusted.home.arpa:4788";
+  const inviteCode = await mintInviteCode(handler);
+  const signUp = await handler(
+    new Request(`${alias}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: alias,
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-origin",
+      },
+      body: JSON.stringify({
+        email: "untrusted-alias@test.local",
+        password: "member-password-123",
+        name: "Untrusted Alias",
+        inviteCode,
+      }),
+    }),
+  );
+  expect(signUp.status).toBe(403);
 });
 
 test("migrations create both the Better Auth and FumaDB executor schema regions", async () => {
