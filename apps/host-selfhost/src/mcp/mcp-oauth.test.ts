@@ -105,108 +105,130 @@ const b64url = (buf: Uint8Array): string =>
     .replaceAll("/", "_")
     .replaceAll("=", "");
 
-test("MCP OAuth opaque-bearer flow authenticates /mcp end-to-end", async () => {
-  const cookie = await signUp("oauth@env.test");
+test.each([false, true])(
+  "MCP OAuth opaque-bearer flow authenticates /mcp end-to-end (interrupted login: %s)",
+  async (interrupted) => {
+    const email = `oauth-${interrupted}@env.test`;
+    let cookie = await signUp(email);
 
-  // 1. Dynamic client registration (public/PKCE client).
-  const reg = await handler(
-    new Request(`${BASE}/api/auth/mcp/register`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        client_name: "test-client",
-        redirect_uris: ["http://localhost:9999/callback"],
-        token_endpoint_auth_method: "none",
-        grant_types: ["authorization_code"],
-        response_types: ["code"],
+    // 1. Dynamic client registration (public/PKCE client).
+    const reg = await handler(
+      new Request(`${BASE}/api/auth/mcp/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          client_name: "test-client",
+          redirect_uris: ["http://localhost:9999/callback"],
+          token_endpoint_auth_method: "none",
+          grant_types: ["authorization_code"],
+          response_types: ["code"],
+        }),
       }),
-    }),
-  );
-  expect([200, 201]).toContain(reg.status);
-  const clientId = String((await json(reg)).client_id);
+    );
+    expect([200, 201]).toContain(reg.status);
+    const clientId = String((await json(reg)).client_id);
 
-  // 2. PKCE authorize with the signed-in session cookie. Self-host forces an
-  // approval screen (prompt=consent injected by the serving layer), so authorize
-  // does NOT redirect straight to the client callback — it redirects to the
-  // relative /mcp-consent page carrying a consent_code. A real client's browser
-  // lands there and the user clicks Allow; we drive that POST directly.
-  const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
-  const challengeBytes = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
-  );
-  const codeChallenge = b64url(challengeBytes);
-  const authorizeUrl = new URL(`${BASE}/api/auth/mcp/authorize`);
-  authorizeUrl.search = new URLSearchParams({
-    response_type: "code",
-    client_id: clientId,
-    redirect_uri: "http://localhost:9999/callback",
-    code_challenge: codeChallenge,
-    code_challenge_method: "S256",
-    scope: "openid",
-  }).toString();
-  const authorize = await handler(
-    new Request(authorizeUrl, { headers: { cookie }, redirect: "manual" }),
-  );
-  expect(authorize.status).toBe(302);
-  // Resolve against BASE — the consent redirect is a relative app path.
-  const consentRedirect = new URL(authorize.headers.get("location") ?? "", BASE);
-  expect(consentRedirect.pathname).toBe("/mcp-consent");
-  const consentCode = consentRedirect.searchParams.get("consent_code") ?? "";
-  expect(consentCode).not.toBe("");
+    // 2. PKCE authorize with the signed-in session cookie. Self-host forces an
+    // approval screen (prompt=consent injected by the serving layer), so authorize
+    // does NOT redirect straight to the client callback — it redirects to the
+    // relative /mcp-consent page carrying a consent_code. A real client's browser
+    // lands there and the user clicks Allow; we drive that POST directly.
+    const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
+    const challengeBytes = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)),
+    );
+    const codeChallenge = b64url(challengeBytes);
+    const authorizeUrl = new URL(`${BASE}/api/auth/mcp/authorize`);
+    authorizeUrl.search = new URLSearchParams({
+      response_type: "code",
+      client_id: clientId,
+      redirect_uri: "http://localhost:9999/callback",
+      code_challenge: codeChallenge,
+      code_challenge_method: "S256",
+      scope: "openid",
+    }).toString();
+    let authorize = await handler(
+      new Request(authorizeUrl, { headers: interrupted ? {} : { cookie }, redirect: "manual" }),
+    );
+    if (interrupted) {
+      const promptCookie = authorize.headers
+        .getSetCookie()
+        .map((value) => value.split(";", 1)[0])
+        .join("; ");
+      authorize = await handler(
+        new Request(`${BASE}/api/auth/sign-in/email`, {
+          method: "POST",
+          headers: { "content-type": "application/json", cookie: promptCookie },
+          body: JSON.stringify({ email, password: "password-12345678" }),
+        }),
+      );
+      cookie = authorize.headers
+        .getSetCookie()
+        .map((value) => value.split(";", 1)[0])
+        .join("; ");
+    }
+    expect(authorize.status).toBe(302);
+    expect(cookie).toContain("session_token=");
+    // Resolve against BASE — the consent redirect is a relative app path.
+    const consentRedirect = new URL(authorize.headers.get("location") ?? "", BASE);
+    expect(consentRedirect.pathname).toBe("/mcp-consent");
+    const consentCode = consentRedirect.searchParams.get("consent_code") ?? "";
+    expect(consentCode).not.toBe("");
 
-  // 2b. Approve on the consent screen — the same POST the /mcp-consent page makes.
-  // It returns { redirectURI } back to the client's callback carrying the code.
-  const consent = await handler(
-    new Request(`${BASE}/api/auth/oauth2/consent`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie },
-      body: JSON.stringify({ accept: true, consent_code: consentCode }),
-    }),
-  );
-  expect(consent.status).toBe(200);
-  const redirectURI = String((await json(consent)).redirectURI ?? "");
-  const code = new URL(redirectURI).searchParams.get("code") ?? "";
-  expect(code).not.toBe("");
+    // 2b. Approve on the consent screen — the same POST the /mcp-consent page makes.
+    // It returns { redirectURI } back to the client's callback carrying the code.
+    const consent = await handler(
+      new Request(`${BASE}/api/auth/oauth2/consent`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie },
+        body: JSON.stringify({ accept: true, consent_code: consentCode }),
+      }),
+    );
+    expect(consent.status).toBe(200);
+    const redirectURI = String((await json(consent)).redirectURI ?? "");
+    const code = new URL(redirectURI).searchParams.get("code") ?? "";
+    expect(code).not.toBe("");
 
-  // 3. Token exchange.
-  const token = await handler(
-    new Request(`${BASE}/api/auth/mcp/token`, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: "http://localhost:9999/callback",
-        client_id: clientId,
-        code_verifier: verifier,
-      }).toString(),
-    }),
-  );
-  expect(token.status).toBe(200);
-  const accessToken = String((await json(token)).access_token);
-  expect(accessToken).not.toBe("");
+    // 3. Token exchange.
+    const token = await handler(
+      new Request(`${BASE}/api/auth/mcp/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: "http://localhost:9999/callback",
+          client_id: clientId,
+          code_verifier: verifier,
+        }).toString(),
+      }),
+    );
+    expect(token.status).toBe(200);
+    const accessToken = String((await json(token)).access_token);
+    expect(accessToken).not.toBe("");
 
-  // 4. The opaque access token authenticates /mcp (initialize succeeds).
-  const init = await handler(
-    new Request(`${BASE}/mcp`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${accessToken}`,
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-03-26",
-          capabilities: {},
-          clientInfo: { name: "t", version: "1" },
+    // 4. The opaque access token authenticates /mcp (initialize succeeds).
+    const init = await handler(
+      new Request(`${BASE}/mcp`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
         },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-03-26",
+            capabilities: {},
+            clientInfo: { name: "t", version: "1" },
+          },
+        }),
       }),
-    }),
-  );
-  expect(init.status).toBe(200);
-  expect(init.headers.get("mcp-session-id")).not.toBe(null);
-});
+    );
+    expect(init.status).toBe(200);
+    expect(init.headers.get("mcp-session-id")).not.toBe(null);
+  },
+);

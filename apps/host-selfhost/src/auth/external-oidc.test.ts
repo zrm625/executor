@@ -106,7 +106,7 @@ describe("external OIDC contract", () => {
         idToken: "forged-id-token-with-claims",
       }),
     ).resolves.toEqual({
-      id: "verified-subject",
+      id: "https://identity.example.test\nverified-subject",
       email: "operator@example.test",
       emailVerified: true,
       name: "Operator",

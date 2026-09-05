@@ -134,6 +134,17 @@ describe("sso config resolution", () => {
     });
   });
 
+  for (const key of SSO_ENV_KEYS) {
+    it(`refuses isolated SSO configuration ${key}`, () => {
+      withSsoEnv({ [key]: "configured" }, () => {
+        expect(() => loadConfig()).toThrow(/must be set together/);
+      });
+      withSsoEnv({ [key]: "" }, () => {
+        expect(() => loadConfig()).toThrow(/must be set together/);
+      });
+    });
+  }
+
   it("refuses credentials without a provider id", () => {
     withSsoEnv({ EXECUTOR_SSO_CLIENT_ID: "id", EXECUTOR_SSO_CLIENT_SECRET: "secret" }, () => {
       expect(() => loadConfig()).toThrow(/EXECUTOR_SSO_PROVIDER_ID/);

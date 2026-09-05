@@ -61,3 +61,15 @@ export const postLoginTarget = (location: {
     ? null
     : safeReturnTo(`${location.pathname}${location.search}`)) ??
   "/";
+
+/** Preserve the original MCP request as top-level parameters through errors. */
+export const loginErrorCallback = (postLogin: string): string => {
+  const query = postLogin.startsWith(`${MCP_AUTHORIZE_PATH}?`)
+    ? postLogin.slice(MCP_AUTHORIZE_PATH.length + 1)
+    : "";
+  const params = new URLSearchParams(
+    mcpAuthorizeResumeTarget(query) ? query : { returnTo: postLogin },
+  );
+  params.set("error", "oidc");
+  return `${LOGIN_PATH}?${params.toString()}`;
+};

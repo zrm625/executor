@@ -24,7 +24,7 @@ const original = {
   secret: process.env.EXECUTOR_OIDC_CLIENT_SECRET,
   secretFile: process.env.EXECUTOR_OIDC_CLIENT_SECRET_FILE,
 };
-const VALID_CLIENT_SECRET = "A".repeat(64);
+const VALID_CLIENT_SECRET = "provider-issued+opaque/secret=with punctuation!";
 const openDescriptorCount = (): number =>
   existsSync("/proc/self/fd") ? readdirSync("/proc/self/fd").length : 0;
 
@@ -89,21 +89,18 @@ describe("resolveOidcConfig", () => {
     expect(resolveOidcConfig()?.clientSecret).toBe(VALID_CLIENT_SECRET);
   });
 
-  it("requires exactly 64 base64url characters and closes a rejected secret file", () => {
+  it("rejects empty credentials and closes a rejected secret file", () => {
     setValidOidcEnvironment();
     delete process.env.EXECUTOR_OIDC_CLIENT_SECRET_FILE;
-    for (const invalid of ["A".repeat(63), "A".repeat(65), `${"A".repeat(63)}+`]) {
-      process.env.EXECUTOR_OIDC_CLIENT_SECRET = invalid;
-      expect(() => resolveOidcConfig()).toThrow("exactly 64 base64url");
-    }
-
+    process.env.EXECUTOR_OIDC_CLIENT_SECRET = "";
+    expect(() => resolveOidcConfig()).toThrow("nonempty");
     const directory = mkdtempSync(join(tmpdir(), "executor-oidc-secret-shape-"));
     const invalidFile = join(directory, "client-secret");
-    writeFileSync(invalidFile, `${"A".repeat(63)}+`, { mode: 0o600 });
+    writeFileSync(invalidFile, "\n", { mode: 0o600 });
     delete process.env.EXECUTOR_OIDC_CLIENT_SECRET;
     process.env.EXECUTOR_OIDC_CLIENT_SECRET_FILE = invalidFile;
     const descriptorsBefore = openDescriptorCount();
-    expect(() => resolveOidcConfig()).toThrow("exactly 64 base64url");
+    expect(() => resolveOidcConfig()).toThrow("nonempty");
     expect(openDescriptorCount()).toBe(descriptorsBefore);
     renameSync(invalidFile, join(directory, "closed-client-secret"));
   });

@@ -7,7 +7,7 @@ import { Label } from "@executor-js/react/components/label";
 import { authClient } from "./auth-client";
 import { fetchSsoProviders, type SsoProvider } from "./auth-config";
 import { AuthLayout } from "./auth-layout";
-import { postLoginTarget } from "../src/auth/return-to";
+import { loginErrorCallback, postLoginTarget } from "../src/auth/return-to";
 
 const EXTERNAL_OIDC_PROVIDER_ID = "external-oidc";
 
@@ -79,7 +79,7 @@ export const LoginPage = () => {
     }
   }, [search]);
 
-  const oidcErrorCallback = `/login?error=oidc&returnTo=${encodeURIComponent(postLogin)}`;
+  const oidcErrorCallback = loginErrorCallback(postLogin);
 
   const startOidcSignIn = async () => {
     setBusy(true);

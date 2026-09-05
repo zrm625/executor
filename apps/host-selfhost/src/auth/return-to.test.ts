@@ -3,6 +3,7 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   isSafeReturnTo,
   loginPath,
+  loginErrorCallback,
   mcpAuthorizeResumeTarget,
   postLoginTarget,
   safeReturnTo,
@@ -126,5 +127,22 @@ describe("loginPath", () => {
     expect(loginPath("/api/oauth/callback?state=oauth-state&code=provider-code")).toBe(
       "/login?returnTo=%2Fapi%2Foauth%2Fcallback%3Fstate%3Doauth-state%26code%3Dprovider-code",
     );
+  });
+});
+
+describe("loginErrorCallback", () => {
+  it("retains MCP authorization parameters across repeated provider failures", () => {
+    const request =
+      "?response_type=code&client_id=abc&redirect_uri=http%3A%2F%2Flocalhost%2Fcallback&state=client-state&code_challenge=pkce&code_challenge_method=S256&scope=openid";
+    const target = postLoginTarget({ pathname: "/login", search: request });
+    const first = new URL(loginErrorCallback(target), "https://executor.example.test");
+    const resumed = postLoginTarget(first);
+    const second = new URL(loginErrorCallback(resumed), first.origin);
+    const actual = new URL(postLoginTarget(second), first.origin);
+    expect(actual.pathname).toBe("/api/auth/mcp/authorize");
+    for (const [key, value] of new URLSearchParams(request)) {
+      expect(actual.searchParams.get(key)).toBe(value);
+    }
+    expect(safeReturnTo("/api/auth/mcp/authorize?response_type=code")).toBeNull();
   });
 });

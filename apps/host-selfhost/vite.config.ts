@@ -158,7 +158,13 @@ function executorApiPlugin(): Plugin {
 
           const response = await handler(webRequest);
           res.statusCode = response.status;
-          response.headers.forEach((value, key) => res.setHeader(key, value));
+          response.headers.forEach((value, key) => {
+            if (key.toLowerCase() !== "set-cookie") res.setHeader(key, value);
+          });
+          // Set-Cookie is repeatable, not comma-joinable. In Bun, forEach visits
+          // each cookie separately; setHeader would overwrite all but the last.
+          const cookies = response.headers.getSetCookie();
+          if (cookies.length > 0) res.setHeader("set-cookie", cookies);
           if (response.body) {
             const reader = response.body.getReader();
             for (;;) {

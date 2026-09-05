@@ -169,7 +169,11 @@ export const makeExternalOidcConfig = (oidc: SelfHostOidcConfig): GenericOAuthCo
       (value) => value,
       () => null,
     );
-    return decodeExternalOidcUserInfo(body);
+    const user = decodeExternalOidcUserInfo(body);
+    // Subjects are issuer-local. The separator cannot occur in a validated
+    // issuer or subject, nor in any legacy subject-only account ID. Legacy
+    // links require authenticated relinking; their original issuer is unknown.
+    return user ? { ...user, id: `${oidc.issuer}\n${user.id}` } : null;
   },
 });
 

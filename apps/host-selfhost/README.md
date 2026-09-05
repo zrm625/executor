@@ -54,7 +54,7 @@ Then set `EXECUTOR_WEB_BASE_URL`, `EXECUTOR_OIDC_ENABLED=true`, and the exact
 `EXECUTOR_OIDC_CLIENT_ID` values supplied by the provider. Every URL must be a
 credential-free HTTPS URL without a query or fragment. Supply exactly one of
 `EXECUTOR_OIDC_CLIENT_SECRET` or `EXECUTOR_OIDC_CLIENT_SECRET_FILE`. A secret
-must be exactly 64 base64url characters. A secret file must be a non-symlink
+is the nonempty opaque value issued by the provider. A secret file must be a non-symlink
 regular file owned by the Executor process UID with mode `0600`.
 
 OIDC cannot create an Executor user or silently attach to an email match. Each
@@ -101,3 +101,12 @@ src/
   db/ · mcp/ · execution.ts · plugins.ts · observability.ts
 web/                the TanStack Router SPA (setup, login, join, admin, …)
 ```
+
+External OIDC links now bind the subject to the configured issuer. Existing
+subject-only links are retained but cannot authenticate: their original issuer
+was not recorded. Users must sign in with their local password and explicitly
+link again with a matching verified provider email. Changing issuer requires
+that same proof; it never reuses another issuer's link. No automatic database
+rewrite or link deletion occurs. Qualify local account access before upgrading.
+A source downgrade does not understand new links and may reactivate old links;
+do not downgrade with a different issuer or assume database rollback safety.

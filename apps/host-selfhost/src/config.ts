@@ -28,7 +28,6 @@ import {
 export const SELF_HOST_NAMESPACE = "executor_selfhost";
 export const SELF_HOST_SCHEMA_VERSION = "1.0.0";
 export const EXTERNAL_OIDC_PROVIDER_ID = "external-oidc";
-const EXTERNAL_OIDC_CLIENT_SECRET_PATTERN = /^[A-Za-z0-9_-]{64}$/;
 const EXTERNAL_OIDC_CLIENT_ID_PATTERN = /^[\x21-\x7e]{1,128}$/;
 
 export interface SelfHostOidcConfig {
@@ -188,9 +187,9 @@ const resolveOidcClientSecret = (): string => {
     );
   }
   if (direct !== undefined) {
-    if (!EXTERNAL_OIDC_CLIENT_SECRET_PATTERN.test(direct)) {
-      // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: reject weak or ambiguously encoded confidential-client credentials before auth starts
-      throw new Error("EXECUTOR_OIDC_CLIENT_SECRET must be exactly 64 base64url characters");
+    if (direct.length === 0) {
+      // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: reject empty confidential-client credentials before auth starts
+      throw new Error("EXECUTOR_OIDC_CLIENT_SECRET must be a nonempty provider-issued secret");
     }
     return direct;
   }
@@ -205,7 +204,7 @@ const resolveOidcClientSecret = (): string => {
   if (pathMetadata.isSymbolicLink()) {
     // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: secret links make custody ambiguous
     throw new Error(
-      "EXECUTOR_OIDC_CLIENT_SECRET_FILE must be an owner-owned, owner-only regular file containing exactly 64 base64url characters",
+      "EXECUTOR_OIDC_CLIENT_SECRET_FILE must be an owner-owned, owner-only regular file containing a nonempty provider-issued secret",
     );
   }
 
@@ -220,20 +219,19 @@ const resolveOidcClientSecret = (): string => {
       !metadata.isFile() ||
       (metadata.mode & 0o077) !== 0 ||
       (currentUid !== undefined && metadata.uid !== currentUid) ||
-      metadata.size < 64 ||
-      metadata.size > 65
+      metadata.size === 0
     ) {
       // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: refuse secrets with ambiguous ownership, links, broad permissions, or invalid size
       throw new Error(
-        "EXECUTOR_OIDC_CLIENT_SECRET_FILE must be an owner-owned, owner-only regular file containing exactly 64 base64url characters",
+        "EXECUTOR_OIDC_CLIENT_SECRET_FILE must be an owner-owned, owner-only regular file containing a nonempty provider-issued secret",
       );
     }
     const contents = readFileSync(descriptor, "utf8");
     const secret = contents.endsWith("\n") ? contents.slice(0, -1) : contents;
-    if (!EXTERNAL_OIDC_CLIENT_SECRET_PATTERN.test(secret)) {
-      // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: reject weak or ambiguously encoded confidential-client credentials before auth starts
+    if (secret.length === 0) {
+      // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: reject empty confidential-client credentials before auth starts
       throw new Error(
-        "EXECUTOR_OIDC_CLIENT_SECRET_FILE must contain exactly 64 base64url characters",
+        "EXECUTOR_OIDC_CLIENT_SECRET_FILE must contain a nonempty provider-issued secret",
       );
     }
     return secret;
@@ -364,7 +362,15 @@ const PROVIDER_ID_PATTERN = /^[a-z0-9-]{1,48}$/;
 const resolveSso = (): SsoConfig | undefined => {
   const clientId = process.env.EXECUTOR_SSO_CLIENT_ID?.trim();
   const clientSecret = process.env.EXECUTOR_SSO_CLIENT_SECRET?.trim();
-  if (!clientId && !clientSecret) return undefined;
+  const configured = [
+    "EXECUTOR_SSO_CLIENT_ID",
+    "EXECUTOR_SSO_CLIENT_SECRET",
+    "EXECUTOR_SSO_PROVIDER_ID",
+    "EXECUTOR_SSO_PROVIDER_NAME",
+    "EXECUTOR_SSO_DISCOVERY_URL",
+    "EXECUTOR_SSO_ALLOWED_DOMAINS",
+  ].some((name) => process.env[name] !== undefined);
+  if (!configured) return undefined;
   if (!clientId || !clientSecret) {
     // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: refuse to boot on half-configured SSO credentials
     throw new Error("EXECUTOR_SSO_CLIENT_ID and EXECUTOR_SSO_CLIENT_SECRET must be set together");
