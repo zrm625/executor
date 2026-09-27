@@ -6,6 +6,7 @@ import { SystemError, SystemHttpApi } from "./api";
 import { BetterAuth, countOrgMembers, type BetterAuthHandle } from "../auth/better-auth";
 import { SelfHostDb, type SelfHostDbHandle } from "../db/self-host-db";
 import { findRedeemableCode } from "../auth/invites";
+import { loadConfig } from "../config";
 
 // ---------------------------------------------------------------------------
 // Handlers for the public system API. Unauthenticated; every DB touch is an
@@ -37,7 +38,13 @@ export const SystemHandlers = HttpApiBuilder.group(SystemHttpApi, "system", (han
           try: () => countOrgMembers(auth, organizationId),
           catch: () => new SystemError({ message: "failed to read setup status" }),
         });
-        return { needsSetup: count === 0 };
+        const config = loadConfig();
+        return {
+          needsSetup: count === 0,
+          oidcEnabled: config.oidc !== undefined,
+          oidcProviderName: config.oidc?.providerName ?? "",
+          passwordSignInEnabled: config.passwordSignInEnabled,
+        };
       }),
     )
     .handle("inviteStatus", ({ params }) =>

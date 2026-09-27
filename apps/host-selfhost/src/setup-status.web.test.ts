@@ -17,7 +17,12 @@ describe("fetchNeedsSetup", () => {
         }),
     );
 
-    await expect(fetchNeedsSetup()).resolves.toBe(false);
+    await expect(fetchNeedsSetup()).resolves.toEqual({
+      needsSetup: false,
+      oidcEnabled: false,
+      oidcProviderName: "",
+      passwordSignInEnabled: true,
+    });
   });
 
   it("retries failed setup checks before surfacing an error", async () => {

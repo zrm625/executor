@@ -1,4 +1,5 @@
 import { createAuthClient } from "better-auth/react";
+import { genericOAuthClient } from "better-auth/client/plugins";
 
 // Better Auth browser client. Talks to the self-host server's /api/auth (same
 // origin); the session cookie it sets is what the shared AuthProvider's
@@ -6,4 +7,5 @@ import { createAuthClient } from "better-auth/react";
 // and sign-out use this — auth STATE comes from the shared AuthProvider.
 export const authClient = createAuthClient({
   baseURL: `${window.location.origin}/api/auth`,
+  plugins: [genericOAuthClient()],
 });

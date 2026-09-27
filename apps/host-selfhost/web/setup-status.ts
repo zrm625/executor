@@ -14,7 +14,14 @@ export class SetupStatusError extends Error {
   }
 }
 
-export const fetchNeedsSetup = async (): Promise<boolean> => {
+export interface SetupStatus {
+  readonly needsSetup: boolean;
+  readonly oidcEnabled: boolean;
+  readonly oidcProviderName: string;
+  readonly passwordSignInEnabled: boolean;
+}
+
+export const fetchNeedsSetup = async (): Promise<SetupStatus> => {
   for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
     const response = await fetch("/api/setup-status", { credentials: "same-origin" }).then(
       (r) => r,
@@ -24,8 +31,13 @@ export const fetchNeedsSetup = async (): Promise<boolean> => {
       const data = (await response.json().then(
         (d) => d,
         () => ({}),
-      )) as { needsSetup?: boolean };
-      return data.needsSetup === true;
+      )) as Partial<SetupStatus>;
+      return {
+        needsSetup: data.needsSetup === true,
+        oidcEnabled: data.oidcEnabled === true,
+        oidcProviderName: typeof data.oidcProviderName === "string" ? data.oidcProviderName : "",
+        passwordSignInEnabled: data.passwordSignInEnabled !== false,
+      };
     }
     if (attempt < retryDelaysMs.length - 1) await sleep(retryDelaysMs[attempt]);
   }

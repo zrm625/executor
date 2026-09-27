@@ -38,6 +38,17 @@ export interface SelfHostConfig {
   // under the data dir) so a single-container deploy boots with no env; the auth
   // layer still validates an explicitly-set env secret is long enough.
   readonly authSecret: string;
+  /** Optional external OIDC authority used for browser sign-in. */
+  readonly oidc:
+    | {
+        readonly providerId: string;
+        readonly providerName: string;
+        readonly issuer: string;
+        readonly discoveryUrl: string;
+        readonly clientId: string;
+      }
+    | undefined;
+  readonly passwordSignInEnabled: boolean;
   readonly bootstrapAdminEmail: string | undefined;
   readonly bootstrapAdminPassword: string | undefined;
   readonly bootstrapAdminName: string;
@@ -158,6 +169,7 @@ export const loadConfig = (): SelfHostConfig => {
   const port = Number.parseInt(process.env.PORT ?? "4788", 10);
   const dataDir = resolveDataDir();
   const webBaseUrl = resolveWebBaseUrl(port);
+  const oidc = resolveOidcConfig();
   return {
     host: process.env.EXECUTOR_HOST ?? "127.0.0.1",
     port,
@@ -166,6 +178,9 @@ export const loadConfig = (): SelfHostConfig => {
     trustedOrigins: resolveTrustedOrigins(webBaseUrl),
     allowLocalNetwork: process.env.EXECUTOR_ALLOW_LOCAL_NETWORK === "true",
     authSecret: resolveAuthSecret(),
+    oidc,
+    passwordSignInEnabled:
+      oidc === undefined || process.env.EXECUTOR_PASSWORD_SIGN_IN_ENABLED === "true",
     bootstrapAdminEmail: process.env.EXECUTOR_BOOTSTRAP_ADMIN_EMAIL,
     bootstrapAdminPassword: process.env.EXECUTOR_BOOTSTRAP_ADMIN_PASSWORD,
     bootstrapAdminName: process.env.EXECUTOR_BOOTSTRAP_ADMIN_NAME ?? "Admin",
@@ -174,6 +189,39 @@ export const loadConfig = (): SelfHostConfig => {
     sandboxTimeoutMs: resolveSandboxTimeoutMs(),
     mcpSessionIdleTtlMs: resolveMcpSessionIdleTtlMs(),
     toolsSyncTtlMs: resolveToolsSyncTtlMs(),
+  };
+};
+
+const resolveOidcConfig = (): SelfHostConfig["oidc"] => {
+  const issuerValue = process.env.EXECUTOR_OIDC_ISSUER_URL?.trim();
+  const clientId = process.env.EXECUTOR_OIDC_CLIENT_ID?.trim();
+  if (!issuerValue && !clientId) return undefined;
+  if (!issuerValue || !clientId) {
+    // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: partial OIDC configuration would leave browser login unusable
+    throw new Error("EXECUTOR_OIDC_ISSUER_URL and EXECUTOR_OIDC_CLIENT_ID must be set together");
+  }
+  if (!URL.canParse(issuerValue)) {
+    // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: refuse a malformed identity authority
+    throw new Error("EXECUTOR_OIDC_ISSUER_URL must be a valid http(s) URL");
+  }
+  const issuerUrl = new URL(issuerValue);
+  if (
+    (issuerUrl.protocol !== "http:" && issuerUrl.protocol !== "https:") ||
+    issuerUrl.username.length > 0 ||
+    issuerUrl.password.length > 0 ||
+    issuerUrl.search.length > 0 ||
+    issuerUrl.hash.length > 0
+  ) {
+    // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: refuse a malformed identity authority
+    throw new Error("EXECUTOR_OIDC_ISSUER_URL must be an http(s) issuer URL without credentials");
+  }
+  const issuer = issuerUrl.toString().replace(/\/$/, "");
+  return {
+    providerId: "executor-oidc",
+    providerName: process.env.EXECUTOR_OIDC_PROVIDER_NAME?.trim() || "Single sign-on",
+    issuer,
+    discoveryUrl: `${issuer}/.well-known/openid-configuration`,
+    clientId,
   };
 };
 

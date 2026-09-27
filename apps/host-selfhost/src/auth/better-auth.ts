@@ -1,6 +1,7 @@
 import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { APIError } from "better-auth/api";
 import { admin, bearer, deviceAuthorization, mcp, organization } from "better-auth/plugins";
+import { genericOAuth } from "better-auth/plugins/generic-oauth";
 import { apiKey } from "@better-auth/api-key";
 import { type Client } from "@libsql/client";
 import { LibsqlDialect, type LibsqlDialectConfig } from "@libsql/kysely-libsql";
@@ -122,7 +123,21 @@ const makeAuthOptions = (client: Client, getOrganizationId: () => string, gate?:
     baseURL: config.webBaseUrl,
     trustedOrigins: [...config.trustedOrigins],
     advanced: { useSecureCookies: !hasInsecureTrustedOrigin },
-    emailAndPassword: { enabled: true },
+    emailAndPassword: { enabled: config.passwordSignInEnabled },
+    ...(config.oidc
+      ? {
+          account: {
+            accountLinking: {
+              trustedProviders: [config.oidc.providerId],
+              // The configured authority is the ownership proof for an
+              // existing bootstrap account with the same email. Self-host's
+              // server-created bootstrap users do not run an email-verification
+              // flow, so requiring a local verified bit would strand them.
+              requireLocalEmailVerified: false,
+            },
+          },
+        }
+      : {}),
     // `apiKey` issues long-lived personal keys (the API-keys page). With
     // `enableSessionForAPIKeys`, presenting a key resolves to its owner's
     // session — so a key works as a Bearer token for the API + MCP endpoint.
@@ -134,6 +149,20 @@ const makeAuthOptions = (client: Client, getOrganizationId: () => string, gate?:
     // are re-emitted by the shared envelope (MCP clients probe the origin root,
     // not the /api/auth basePath).
     plugins: [
+      genericOAuth({
+        config: config.oidc
+          ? [
+              {
+                providerId: config.oidc.providerId,
+                discoveryUrl: config.oidc.discoveryUrl,
+                issuer: config.oidc.issuer,
+                clientId: config.oidc.clientId,
+                scopes: ["openid", "profile", "email"],
+                pkce: true,
+              },
+            ]
+          : [],
+      }),
       // SINGLE-ORG INSTANCE, ENFORCED. `allowUserToCreateOrganization: false`
       // closes `POST /api/auth/organization/create` to every session. Left at
       // its default (true) it was the first step of a privilege escalation: any
@@ -217,9 +246,19 @@ const makeAuthOptions = (client: Client, getOrganizationId: () => string, gate?:
                   }
                 },
                 after: async (user, context) => {
-                  if (context?.path !== SIGNUP_PATH) return;
                   const auth = gate.getAuth();
                   if (!auth) return;
+                  if (context?.path?.startsWith("/oauth2/callback/")) {
+                    await auth.api.addMember({
+                      body: {
+                        userId: user.id,
+                        role: (await orgHasNoMembers(gate)) ? "owner" : "member",
+                        organizationId: gate.organizationId,
+                      },
+                    });
+                    return;
+                  }
+                  if (context?.path !== SIGNUP_PATH) return;
                   // First user into an empty org becomes its owner (no code).
                   if (await orgHasNoMembers(gate)) {
                     await auth.api.addMember({

@@ -19,7 +19,12 @@ export class SystemError extends Schema.TaggedErrorClass<SystemError>()(
 ) {}
 
 export const HealthResponse = Schema.Struct({ status: Schema.String });
-export const SetupStatusResponse = Schema.Struct({ needsSetup: Schema.Boolean });
+export const SetupStatusResponse = Schema.Struct({
+  needsSetup: Schema.Boolean,
+  oidcEnabled: Schema.Boolean,
+  oidcProviderName: Schema.String,
+  passwordSignInEnabled: Schema.Boolean,
+});
 export const InviteStatusResponse = Schema.Struct({ valid: Schema.Boolean });
 
 const InviteStatusParams = { code: Schema.String };

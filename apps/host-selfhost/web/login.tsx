@@ -16,7 +16,15 @@ import { postLoginTarget } from "../src/auth/return-to";
 // There is no self-signup here: open registration is closed. New people join by
 // redeeming an invite — either the full /join/<code> link, or by entering the
 // code here ("Have an invite code?"), which forwards to the same join page.
-export const LoginPage = () => {
+export const LoginPage = ({
+  oidcEnabled,
+  oidcProviderName,
+  passwordSignInEnabled,
+}: {
+  readonly oidcEnabled: boolean;
+  readonly oidcProviderName: string;
+  readonly passwordSignInEnabled: boolean;
+}) => {
   // Where to go after sign-in. The gate renders this page IN PLACE of the
   // requested route without navigating, so the live location is what carries a
   // deep link (`/connect/linear`) across sign-in — see `postLoginTarget`.
@@ -39,6 +47,19 @@ export const LoginPage = () => {
       return;
     }
     window.location.href = postLogin;
+  };
+
+  const signInWithOidc = async () => {
+    setBusy(true);
+    setError(null);
+    const result = await authClient.signIn.oauth2({
+      providerId: "executor-oidc",
+      callbackURL: postLogin,
+    });
+    if (result.error) {
+      setBusy(false);
+      setError(result.error.message ?? "Single sign-on failed");
+    }
   };
 
   const redeem = (event: FormEvent) => {
@@ -64,37 +85,52 @@ export const LoginPage = () => {
         </div>
 
         {mode === "signin" ? (
-          <form onSubmit={signIn} className="space-y-4">
-            <div className="space-y-1.5">
-              <Label htmlFor="email">Email</Label>
-              <Input
-                id="email"
-                type="email"
-                placeholder="you@example.com"
-                value={email}
-                onChange={(e) => setEmail((e.target as HTMLInputElement).value)}
-                autoComplete="email"
-                required
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword((e.target as HTMLInputElement).value)}
-                autoComplete="current-password"
-                required
-                minLength={8}
-              />
-            </div>
-            {error && <p className="text-sm text-destructive">{error}</p>}
-            <Button type="submit" disabled={busy} className="w-full">
-              {busy ? "…" : "Sign in"}
-            </Button>
-          </form>
+          <div className="space-y-4">
+            {oidcEnabled && (
+              <Button type="button" disabled={busy} className="w-full" onClick={signInWithOidc}>
+                {busy ? "…" : `Continue with ${oidcProviderName}`}
+              </Button>
+            )}
+            {oidcEnabled && passwordSignInEnabled && (
+              <div className="text-center text-xs uppercase tracking-wide text-muted-foreground">
+                or use an instance account
+              </div>
+            )}
+            {passwordSignInEnabled && (
+              <form onSubmit={signIn} className="space-y-4">
+                <div className="space-y-1.5">
+                  <Label htmlFor="email">Email</Label>
+                  <Input
+                    id="email"
+                    type="email"
+                    placeholder="you@example.com"
+                    value={email}
+                    onChange={(e) => setEmail((e.target as HTMLInputElement).value)}
+                    autoComplete="email"
+                    required
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="password">Password</Label>
+                  <Input
+                    id="password"
+                    type="password"
+                    placeholder="••••••••"
+                    value={password}
+                    onChange={(e) => setPassword((e.target as HTMLInputElement).value)}
+                    autoComplete="current-password"
+                    required
+                    minLength={8}
+                  />
+                </div>
+                {error && <p className="text-sm text-destructive">{error}</p>}
+                <Button type="submit" disabled={busy} className="w-full">
+                  {busy ? "…" : "Sign in"}
+                </Button>
+              </form>
+            )}
+            {error && !passwordSignInEnabled && <p className="text-sm text-destructive">{error}</p>}
+          </div>
         ) : (
           <form onSubmit={redeem} className="space-y-4">
             <div className="space-y-1.5">
@@ -113,19 +149,21 @@ export const LoginPage = () => {
           </form>
         )}
 
-        <div className="text-center">
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={() => {
-              setMode(mode === "signin" ? "code" : "signin");
-              setError(null);
-            }}
-            className="text-sm font-normal text-muted-foreground hover:text-foreground"
-          >
-            {mode === "signin" ? "Have an invite code? Join" : "Already have an account? Sign in"}
-          </Button>
-        </div>
+        {passwordSignInEnabled && (
+          <div className="text-center">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => {
+                setMode(mode === "signin" ? "code" : "signin");
+                setError(null);
+              }}
+              className="text-sm font-normal text-muted-foreground hover:text-foreground"
+            >
+              {mode === "signin" ? "Have an invite code? Join" : "Already have an account? Sign in"}
+            </Button>
+          </div>
+        )}
       </div>
     </AuthLayout>
   );
