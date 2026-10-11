@@ -20,6 +20,7 @@ env:
 
 jobs:
   check:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.head.repo.full_name != 'UsefulSoftwareCo/executor' && !startsWith(github.head_ref, 'sync/') && !contains(github.head_ref, 'upstream-sync')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
