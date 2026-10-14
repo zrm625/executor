@@ -64,6 +64,7 @@ const SSO_ENV_KEYS = [
   "EXECUTOR_SSO_CLIENT_ID",
   "EXECUTOR_SSO_CLIENT_SECRET",
   "EXECUTOR_SSO_ALLOWED_DOMAINS",
+  "EXECUTOR_SSO_PUBLIC_CLIENT",
 ] as const;
 
 // Run a block with the SSO env vars swapped out, restoring them afterwards so
