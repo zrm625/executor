@@ -13,6 +13,7 @@ import { encryptedSecretsRepartitionDataMigration } from "@executor-js/plugin-en
 
 import {
   providerServiceSplitDataMigration,
+  providerServiceCatalogRepairDataMigration,
   runSqliteProviderServiceSplitMigration,
   type BlobRow,
 } from "@executor-js/plugin-provider-service-split";
@@ -248,6 +249,7 @@ const cloudflareDataMigrations = (bucket: R2Bucket | undefined): readonly Sqlite
         }).pipe(Effect.asVoid);
       }),
   },
+  providerServiceCatalogRepairDataMigration,
   // Stale-mark connections whose operations return NDJSON so their tool rows
   // rebuild with array-wrapped output schemas (mirrors cloud's drizzle 0010).
   openApiNdjsonOutputDataMigration,

@@ -1394,6 +1394,130 @@ paths:
     }),
   );
 
+  it.effect("repairs a migrated provider connection whose operation catalog is missing", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const specServer = yield* serveMutableOpenApiSpecTestServer({ initialApi: TestApi });
+        const config = makeTestConfig({ plugins: testPlugins() });
+        const executor = yield* createExecutor(config);
+        const integration = IntegrationSlug.make("google_gmail");
+
+        yield* executor.openapi.addSpec({
+          spec: { kind: "url", url: specServer.specUrl },
+          slug: integration,
+          family: "google",
+          baseUrl: specServer.baseUrl,
+          authenticationTemplate: [apiKeyTemplate],
+        });
+        yield* executor.connections.create({
+          owner: "org",
+          name: ConnectionName.make("main"),
+          integration,
+          template: AuthTemplateSlug.make("apiKey"),
+          value: "secret-key-123",
+        });
+        expect((yield* executor.tools.list({ integration })).length).toBeGreaterThan(0);
+
+        // The migrated hash can still refer to a monolith. Re-fetch the
+        // selected service instead of rebuilding tools from that old blob.
+        yield* specServer.setApi(
+          HttpApi.make("selectedService").add(
+            HttpApiGroup.make("items").add(
+              HttpApiEndpoint.get("listItems", "/items", { success: Schema.Array(Item) }),
+            ),
+          ),
+        );
+
+        // Reproduce the bad service-split state: the integration + source URL
+        // and connection survived, but operation storage and tool rows did not,
+        // while the follow-up migration has marked the connection stale.
+        yield* Effect.promise(() =>
+          config.db.deleteMany("plugin_storage", {
+            where: (b) => b.and(b("plugin_id", "=", "openapi"), b("collection", "=", "operation")),
+          }),
+        );
+        yield* Effect.promise(() =>
+          config.db.deleteMany("tool", {
+            where: (b) => b("integration", "=", String(integration)),
+          }),
+        );
+        yield* Effect.promise(() =>
+          config.db.updateMany("connection", {
+            where: (b) => b("integration", "=", String(integration)),
+            set: { tools_synced_at: null },
+          }),
+        );
+
+        const repaired = yield* executor.tools.list({ integration });
+        expect(
+          repaired.map((tool) => String(tool.name)),
+          "the next catalog read refetches the provider spec and restores tools",
+        ).toContain("items.listItems");
+        expect(repaired.map((tool) => String(tool.name))).not.toContain("items.queryRows");
+        const operations = yield* Effect.promise(() =>
+          config.db.findMany("plugin_storage", {
+            where: (b) => b.and(b("plugin_id", "=", "openapi"), b("collection", "=", "operation")),
+          }),
+        );
+        expect(operations.length, "the repaired operation catalog is persisted").toBeGreaterThan(0);
+      }),
+    ),
+  );
+
+  it.effect("member reads preserve the prior provider tools without repairing org storage", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const specServer = yield* serveMutableOpenApiSpecTestServer({ initialApi: TestApi });
+        const config = makeTestConfig({ plugins: testPlugins() });
+        const blobs = recordingBlobStore();
+        const admin = yield* createExecutor({ ...config, blobs: blobs.store });
+        const integration = IntegrationSlug.make("microsoft_calendar");
+        yield* admin.openapi.addSpec({
+          spec: { kind: "url", url: specServer.specUrl },
+          slug: integration,
+          family: "microsoft",
+          authenticationTemplate: [apiKeyTemplate],
+        });
+        yield* admin.connections.create({
+          owner: "org",
+          name: ConnectionName.make("main"),
+          integration,
+          template: AuthTemplateSlug.make("apiKey"),
+          value: "synthetic-api-key",
+        });
+        const before = yield* admin.tools.list({ integration });
+        yield* Effect.promise(() =>
+          config.db.deleteMany("plugin_storage", {
+            where: (b) => b.and(b("plugin_id", "=", "openapi"), b("collection", "=", "operation")),
+          }),
+        );
+        yield* Effect.promise(() =>
+          config.db.updateMany("connection", {
+            where: (b) => b("integration", "=", String(integration)),
+            set: { tools_synced_at: null },
+          }),
+        );
+        const writes = blobs.writeCount();
+        const member = yield* createExecutor({
+          ...config,
+          blobs: blobs.store,
+          orgWrites: "denied",
+        });
+        const after = yield* member.tools.list({ integration });
+        expect(after.map((tool) => String(tool.name))).toEqual(
+          before.map((tool) => String(tool.name)),
+        );
+        expect(blobs.writeCount()).toBe(writes);
+        const operations = yield* Effect.promise(() =>
+          config.db.findMany("plugin_storage", {
+            where: (b) => b.and(b("plugin_id", "=", "openapi"), b("collection", "=", "operation")),
+          }),
+        );
+        expect(operations).toEqual([]);
+      }),
+    ),
+  );
+
   it.effect("updateSpec accepts new inline content for blob-sourced integrations", () =>
     Effect.scoped(
       Effect.gen(function* () {
