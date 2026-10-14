@@ -17,9 +17,8 @@ new account is admitted. New admitted accounts receive membership under the exis
 SSO rules. Public PKCE does not make an arbitrary issuer account an instance owner
 or automatically link it to an unverified bootstrap identity.
 
-The retained older external-OIDC candidates also proposed password-login replacement
-and trusted linking of unverified local accounts. Those policy changes are excluded.
-Migrate old `EXECUTOR_OIDC_*` configuration to the current SSO variables only under
-separate operator authority; these source changes do not alter deployed settings.
-The Okta emulator tests exercise public and confidential discovery, authorization,
-callback, admission denial, and membership using synthetic accounts.
+Public PKCE preserves password login and existing account-linking policy. Configure
+the current SSO variables under separate operator authority; source changes do not
+alter deployed settings. The Okta emulator tests exercise public and confidential
+discovery, authorization, callback, admission denial, and membership using synthetic
+accounts.

@@ -61,6 +61,5 @@ authority. Choose the exact owner and browser origin without changing account ro
 Rollback the consumer independently. Preserve the producer's current session,
 archive, credentials, and deduplication receipts across runtime changes.
 
-Old fixed Pyre deployment runners are historical recovery inputs and cannot be
-replayed against later state. Source checks do not authorize deployment or prove
-phone pairing, real passkey login, authenticated restart, natural refresh, or restore.
+Source checks do not authorize deployment or prove phone pairing, real passkey
+login, authenticated restart, natural refresh, or restore.
