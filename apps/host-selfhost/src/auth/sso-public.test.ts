@@ -17,6 +17,7 @@ import { mintInviteCode } from "../testing/mint-invite";
 // the app import, so `loadConfig` sees a fully-configured instance at boot.
 const BASE = "http://localhost:4788";
 const CALLBACK = `${BASE}/api/auth/oauth2/callback/okta`;
+const decodeRegistration = Schema.decodeUnknownSync(Schema.Struct({ client_id: Schema.String }));
 
 // Owner policy requires a private per-run hosted instance, not a released port reservation.
 const created = await fetch("https://okta.emulators.dev/_emulate/instances", {
@@ -34,48 +35,67 @@ const client = await connectEmulator({ service: "okta", baseUrl: instance.provid
 const idp = { url: instance.providerBaseUrl };
 afterAll(() => client.reset());
 
-const registration = await fetch(`${idp.url}/oauth2/v1/clients`, {
-  method: "POST",
-  headers: { "content-type": "application/json" },
-  body: JSON.stringify({
-    client_name: "executor-selfhost-test",
-    redirect_uris: [CALLBACK],
-    grant_types: ["authorization_code"],
-    response_types: ["code"],
-    token_endpoint_auth_method: "none",
-  }),
-}).then((r) => r.json() as Promise<{ client_id: string; client_secret: string }>);
-
-const createIdpUser = (email: string, firstName: string) =>
-  fetch(`${idp.url}/api/v1/users`, {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: "SSWS test" },
-    body: JSON.stringify({ profile: { login: email, email, firstName, lastName: "User" } }),
-  });
-await createIdpUser("alice@example.com", "Alice");
-await createIdpUser("mallory@evil.test", "Mallory");
-
 const dataDirectory = mkdtempSync(join(tmpdir(), "eh-sso-public-"));
-process.env.EXECUTOR_DATA_DIR = dataDirectory;
-process.env.BETTER_AUTH_SECRET = randomBytes(32).toString("hex");
-process.env.EXECUTOR_BOOTSTRAP_ADMIN_EMAIL = "admin@test.local";
-process.env.EXECUTOR_BOOTSTRAP_ADMIN_PASSWORD = "admin-password-123";
-process.env.EXECUTOR_SSO_PROVIDER_ID = "okta";
-process.env.EXECUTOR_SSO_DISCOVERY_URL = `${idp.url}/.well-known/openid-configuration`;
-process.env.EXECUTOR_SSO_CLIENT_ID = registration.client_id;
-delete process.env.EXECUTOR_SSO_CLIENT_SECRET;
-process.env.EXECUTOR_SSO_PUBLIC_CLIENT = "true";
-process.env.EXECUTOR_SSO_ALLOWED_DOMAINS = "Example.com, @second.example ,";
+const { loadConfig, emailDomain, handler } = await (async () => {
+  // oxlint-disable-next-line executor/no-try-catch-or-throw -- boundary: failed hosted fixture setup must reset its instance and remove local state before collection aborts
+  try {
+    const registrationResponse = await fetch(`${idp.url}/oauth2/v1/clients`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        client_name: "executor-selfhost-test",
+        redirect_uris: [CALLBACK],
+        grant_types: ["authorization_code"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
+      }),
+    });
+    expect(registrationResponse.status).toBe(201);
+    const registration = decodeRegistration(await registrationResponse.json());
+    const managementCredential = await client.credentials.mint({ type: "api-key" });
+    expect(managementCredential.token).toBeDefined();
 
-const { loadConfig } = await import("../config");
-const { emailDomain } = await import("./sso");
-const { makeSelfHostApiHandler } = await import("../app");
+    const createIdpUser = async (email: string, firstName: string) => {
+      const response = await fetch(`${idp.url}/api/v1/users`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `SSWS ${managementCredential.token}`,
+        },
+        body: JSON.stringify({ profile: { login: email, email, firstName, lastName: "User" } }),
+      });
+      expect(response.status).toBe(201);
+    };
+    await createIdpUser("alice@example.com", "Alice");
+    await createIdpUser("mallory@evil.test", "Mallory");
 
-const { handler, dispose } = await makeSelfHostApiHandler();
-afterAll(async () => {
-  await dispose();
-  rmSync(dataDirectory, { recursive: true, force: true });
-});
+    process.env.EXECUTOR_DATA_DIR = dataDirectory;
+    process.env.BETTER_AUTH_SECRET = randomBytes(32).toString("hex");
+    process.env.EXECUTOR_BOOTSTRAP_ADMIN_EMAIL = "admin@test.local";
+    process.env.EXECUTOR_BOOTSTRAP_ADMIN_PASSWORD = "admin-password-123";
+    process.env.EXECUTOR_SSO_PROVIDER_ID = "okta";
+    process.env.EXECUTOR_SSO_DISCOVERY_URL = `${idp.url}/.well-known/openid-configuration`;
+    process.env.EXECUTOR_SSO_CLIENT_ID = registration.client_id;
+    delete process.env.EXECUTOR_SSO_CLIENT_SECRET;
+    process.env.EXECUTOR_SSO_PUBLIC_CLIENT = "true";
+    process.env.EXECUTOR_SSO_ALLOWED_DOMAINS = "Example.com, @second.example ,";
+
+    const { loadConfig } = await import("../config");
+    const { emailDomain } = await import("./sso");
+    const { makeSelfHostApiHandler } = await import("../app");
+
+    const { handler, dispose } = await makeSelfHostApiHandler();
+    afterAll(async () => {
+      await dispose().finally(() => rmSync(dataDirectory, { recursive: true, force: true }));
+    });
+
+    return { loadConfig, emailDomain, handler };
+  } catch (error) {
+    await client.reset().finally(() => rmSync(dataDirectory, { recursive: true, force: true }));
+    // oxlint-disable-next-line executor/no-try-catch-or-throw -- preserve the actual fixture setup failure
+    throw error;
+  }
+})();
 
 const SSO_ENV_KEYS = [
   "EXECUTOR_SSO_PROVIDER_ID",
