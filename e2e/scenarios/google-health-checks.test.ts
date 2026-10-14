@@ -6,6 +6,7 @@ import type { HttpApiClient } from "effect/unstable/httpapi";
 import { composePluginApi } from "@executor-js/api/server";
 import { connectEmulator, type EmulatorClient } from "@executor-js/emulate";
 import { openApiHttpPlugin } from "@executor-js/plugin-openapi/api";
+import { toolkitsPlugin } from "@executor-js/plugin-toolkits/server";
 import {
   AuthTemplateSlug,
   ConnectionName,
@@ -19,7 +20,7 @@ import { Api, Browser, Target } from "../src/services";
 import type { Identity, Target as TargetShape } from "../src/target";
 import { type BrowserSurface, visit } from "../src/surfaces/browser";
 
-const api = composePluginApi([openApiHttpPlugin()] as const);
+const api = composePluginApi([openApiHttpPlugin(), toolkitsPlugin()] as const);
 type Client = HttpApiClient.ForApi<typeof api>;
 const GOOGLE_AUTH_TEMPLATE = AuthTemplateSlug.make("googleOAuth2");
 const CONNECTION = ConnectionName.make("main");
@@ -439,6 +440,121 @@ scenario(
           .pipe(Effect.ignore);
         yield* client.openapi.removeSpec({ params: { slug } }).pipe(Effect.ignore);
       }),
+    );
+  }),
+);
+
+scenario(
+  "Google · email toolkit bundle saves exact tools from an emulator account",
+  { timeout: 300_000 },
+  Effect.gen(function* () {
+    const target = yield* Target;
+    const browser = yield* Browser;
+    const { client: makeClient } = yield* Api;
+    const identity = yield* target.newIdentity();
+    const client = yield* makeClient(api, identity);
+    const emulator = yield* createGoogleEmulator;
+    const integration = IntegrationSlug.make("google_gmail");
+    const oauthClient = OAuthClientSlug.make(unique("bundle_oauth"));
+    const toolkit = yield* client.toolkits.create({
+      payload: { owner: "org", name: unique("email_bundle") },
+    });
+
+    yield* Effect.gen(function* () {
+      yield* addGooglePresetFromDirectUrl(
+        browser,
+        identity,
+        "Gmail",
+        "google-gmail",
+        googleDiscoveryUrl("gmail", "v1"),
+        String(integration),
+      );
+      yield* connectGoogleAccount({
+        client,
+        emulator: emulator.client,
+        emulatorBaseUrl: emulator.baseUrl,
+        target,
+        integration,
+        oauthClient,
+      });
+      const tools = yield* client.tools.list({ query: { integration, connection: CONNECTION } });
+      const expected = tools
+        .filter(
+          (tool) =>
+            String(tool.name).startsWith("gmail.") &&
+            ["get", "list"].includes(String(tool.name).split(".").at(-1) ?? ""),
+        )
+        .map((tool) => String(tool.address).replace(/^tools\./, ""))
+        .sort();
+      expect(expected.length).toBeGreaterThan(0);
+      expect(tools.some((tool) => String(tool.name) === "gmail.users.messages.send")).toBe(true);
+
+      yield* browser.session(identity, async ({ page, step }) => {
+        await step("Choose the Email read-only tool bundle for this account", async () => {
+          await visit(page, `/default/toolkits/${toolkit.slug}`);
+          await page.getByRole("button", { name: "Manage toolkit connections" }).click();
+          const dialog = page.getByRole("dialog", { name: "Manage connections" });
+          await dialog.getByRole("button", { name: /^Add bundle Email read-only from / }).click();
+          await dialog.getByRole("button", { name: /^Add bundle Email read-only from / }).waitFor();
+          await page.waitForFunction(() =>
+            Array.from(document.querySelectorAll("button")).some(
+              (button) =>
+                button.getAttribute("aria-label")?.startsWith("Add bundle Email read-only from ") &&
+                button.disabled,
+            ),
+          );
+          await page.keyboard.press("Escape");
+          await dialog.waitFor({ state: "hidden" });
+        });
+        await step(
+          "The toolkit shows email reads while send and delete stay outside the toolkit",
+          async () => {
+            const tree = page.getByRole("region", { name: "Toolkit tools" });
+            await tree.getByLabel("Filter tools").fill("messages.list");
+            await tree.getByRole("button").filter({ hasText: "list" }).last().waitFor();
+            await tree.getByLabel("Filter tools").fill("messages.send");
+            expect(await tree.getByRole("button").filter({ hasText: "send" }).count()).toBe(0);
+            await tree.getByLabel("Filter tools").fill("messages.delete");
+            expect(await tree.getByRole("button").filter({ hasText: "delete" }).count()).toBe(0);
+            await tree.getByLabel("Filter tools").clear();
+          },
+        );
+        await step("Remove the exact bundle tools without disconnecting the account", async () => {
+          await page.getByRole("button", { name: "Manage toolkit connections" }).click();
+          const dialog = page.getByRole("dialog", { name: "Manage connections" });
+          await dialog
+            .getByRole("button", { name: /^Remove bundle Email read-only from / })
+            .click();
+          await dialog
+            .getByRole("button", { name: /^Remove bundle Email read-only from / })
+            .waitFor({ state: "hidden" });
+          await dialog.getByRole("button", { name: /^Add bundle Email read-only from / }).click();
+          await page.waitForFunction(() =>
+            Array.from(document.querySelectorAll("button")).some(
+              (button) =>
+                button.getAttribute("aria-label")?.startsWith("Add bundle Email read-only from ") &&
+                button.disabled,
+            ),
+          );
+        });
+      });
+      const saved = yield* client.toolkits.listConnections({ params: { toolkitId: toolkit.id } });
+      expect(saved.connections.map((row) => row.pattern).sort()).toEqual(expected);
+      const account = yield* client.connections.list({ query: { integration, owner: "org" } });
+      expect(account.map((row) => row.name)).toContain(CONNECTION);
+    }).pipe(
+      Effect.ensuring(
+        Effect.gen(function* () {
+          yield* client.toolkits.remove({ params: { toolkitId: toolkit.id } }).pipe(Effect.ignore);
+          yield* client.connections
+            .remove({ params: { owner: "org", integration, name: CONNECTION } })
+            .pipe(Effect.ignore);
+          yield* client.oauth
+            .removeClient({ params: { slug: oauthClient }, payload: { owner: "org" } })
+            .pipe(Effect.ignore);
+          yield* client.openapi.removeSpec({ params: { slug: integration } }).pipe(Effect.ignore);
+        }),
+      ),
     );
   }),
 );

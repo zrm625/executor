@@ -1,4 +1,5 @@
 import { useId, useMemo, useState } from "react";
+import { googleToolkitBundles } from "./google-bundles";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import * as Atom from "effect/unstable/reactivity/Atom";
@@ -385,8 +386,10 @@ const configuredConnectionViews = (
   showOwnerLabels: boolean,
 ): readonly ConfiguredConnectionView[] =>
   connections.map((connection) => {
-    const group = connectionGroups.find((candidate) =>
-      candidate.patterns.includes(connection.pattern),
+    const group = connectionGroups.find(
+      (candidate) =>
+        candidate.patterns.includes(connection.pattern) ||
+        candidate.tools.some((tool) => toolMatchId(tool) === connection.pattern),
     );
     if (!group) {
       return {
@@ -812,6 +815,37 @@ function AddConnectionDialog(props: {
     });
   }, [props.groups, trimmedQuery]);
 
+  const bundleRows = useMemo(
+    () =>
+      filteredGroups.flatMap((group) => {
+        const integration = props.integrations.find(
+          (row) => String(row.slug) === group.integration,
+        );
+        if (integration?.family !== "google") return [];
+        return googleToolkitBundles(
+          group.tools
+            .filter((tool) => !tool.static)
+            .map((tool) => ({
+              name: tool.name,
+              pattern: toolMatchId(tool),
+            })),
+        ).map((bundle) => ({
+          ...bundle,
+          group,
+          exactConnectionIds: props.configuredConnections
+            .filter((connection) => bundle.patterns.includes(connection.pattern))
+            .map((connection) => connection.id),
+          missingPatterns: bundle.patterns.filter(
+            (pattern) =>
+              !props.configuredConnections.some((connection) =>
+                matchPattern(connection.pattern, pattern),
+              ),
+          ),
+        }));
+      }),
+    [filteredGroups, props.integrations, props.configuredConnections],
+  );
+
   const addConnection = async (patterns: readonly string[]) => {
     await props.onAddPatterns(patterns);
   };
@@ -877,6 +911,62 @@ function AddConnectionDialog(props: {
             ) : null}
           </div>
           <div className="min-h-0 overflow-y-auto p-3" style={{ maxHeight: "32rem" }}>
+            {bundleRows.length > 0 ? (
+              <div className="mb-4 space-y-2">
+                <div className="px-1 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
+                  Tool bundles
+                </div>
+                <p className="px-1 text-xs text-muted-foreground">
+                  Select current tools only. Account permissions stay the same.
+                </p>
+                <div className="overflow-hidden rounded-md border border-border/70 bg-background/30">
+                  {bundleRows.map((bundle) => (
+                    <div
+                      key={`${bundle.group.id}:${bundle.id}`}
+                      className="flex min-w-0 items-center gap-3 border-b border-border/50 px-3 py-2.5 last:border-b-0"
+                    >
+                      <BoxIcon className="size-4 shrink-0 text-muted-foreground" />
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="text-xs font-medium">{bundle.name}</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          {connectionTitleForHost(bundle.group, props.showOwnerLabels)} ·{" "}
+                          {bundle.patterns.length} tools
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">{bundle.summary}</p>
+                      </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={bundle.missingPatterns.length === 0}
+                        aria-label={`Add bundle ${bundle.name} from ${connectionTitleForHost(bundle.group, props.showOwnerLabels)}`}
+                        onClick={() => void addConnection(bundle.missingPatterns)}
+                      >
+                        {bundle.missingPatterns.length === 0
+                          ? "Added"
+                          : `Add ${bundle.missingPatterns.length}`}
+                      </Button>
+                      {bundle.exactConnectionIds.length > 0 ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          aria-label={`Remove bundle ${bundle.name} from ${connectionTitleForHost(bundle.group, props.showOwnerLabels)}`}
+                          onClick={() =>
+                            void (async () => {
+                              for (const id of bundle.exactConnectionIds)
+                                await removeConnection(id);
+                            })()
+                          }
+                        >
+                          Remove
+                        </Button>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
             <div className="mb-2 flex items-center justify-between px-1">
               <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
                 Connections
