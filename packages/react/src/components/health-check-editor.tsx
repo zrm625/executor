@@ -209,13 +209,19 @@ function HealthCheckConfigFields(props: {
                     value={args[param.name] ?? ""}
                     onChange={(e) => props.onArgChange(param.name, e.target.value)}
                     placeholder='{"pageSize": 1}'
-                    aria-label={`${param.name} (JSON)`}
+                    aria-label={
+                      param.location === "body" ? "Request body (JSON)" : `${param.name} (JSON)`
+                    }
                     aria-invalid={!parseHealthCheckArgs(args, selected?.parameters).ok}
                     disabled={disabled}
                     className="font-mono text-xs"
                   />
                   {!parseHealthCheckArgs(args, selected?.parameters).ok ? (
-                    <p className="text-xs text-destructive">Enter a valid JSON argument.</p>
+                    <p className="text-xs text-destructive">
+                      {param.location === "body"
+                        ? "Enter a valid JSON request body."
+                        : "Enter a valid JSON argument."}
+                    </p>
                   ) : null}
                 </>
               ) : (

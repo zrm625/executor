@@ -1,4 +1,4 @@
-import { parseHealthCheckArgs } from "../lib/health-check-args";
+import { isJsonHealthArgument, parseHealthCheckArgs } from "../lib/health-check-args";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAtomRefresh, useAtomSet, useAtomValue } from "@effect/atom-react";
 import * as Exit from "effect/Exit";
@@ -1309,7 +1309,11 @@ function RequestCheckPanel(props: {
         })),
     [candidates],
   );
-  const requiredParams = (selected?.parameters ?? []).filter((p) => p.required);
+  const argumentParams = (selected?.parameters ?? []).filter(
+    (p) => p.required || p.valueFormat === "json",
+  );
+  const usesJsonArguments = argumentParams.some((p) => p.valueFormat === "json");
+  const validArgs = parseHealthCheckArgs(props.args, selected?.parameters).ok;
   const healthy = result?.status === "healthy";
   // Identity-looking fields first, then response order; capped so a chatty
   // response can't blow the modal up (the hidden tail adds nothing, since the
@@ -1359,29 +1363,51 @@ function RequestCheckPanel(props: {
         </Button>
       </div>
 
-      {/* Required args, only when the chosen call needs them. */}
-      {!configuredOperation && requiredParams.length > 0 ? (
+      {/* Required parameters and editable MCP JSON arguments. */}
+      {!configuredOperation && argumentParams.length > 0 ? (
         <div className="space-y-2 border-t border-border px-3 py-2.5">
-          {requiredParams.map((param) => (
+          {argumentParams.map((param) => (
             <div key={param.name} className="flex min-w-0 items-center gap-2.5">
               <Label
                 htmlFor={`hc-pick-arg-${param.name}`}
                 className="w-32 shrink-0 truncate font-mono text-xs font-normal text-muted-foreground"
               >
                 {param.name}
+                {isJsonHealthArgument(param.name, selected?.parameters) ? " (JSON)" : ""}
               </Label>
               <Input
                 id={`hc-pick-arg-${param.name}`}
+                aria-label={
+                  isJsonHealthArgument(param.name, selected?.parameters)
+                    ? `${param.name} (JSON)`
+                    : param.name
+                }
+                aria-invalid={
+                  !parseHealthCheckArgs(
+                    { [param.name]: props.args[param.name] ?? "" },
+                    selected?.parameters,
+                  ).ok
+                }
                 value={props.args[param.name] ?? ""}
                 onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
                   props.onArgChange(param.name, e.target.value)
                 }
-                placeholder={param.description ?? "required"}
+                placeholder={param.description ?? (param.required ? "required" : "optional")}
                 disabled={props.validating}
                 className="h-7 font-mono text-xs"
               />
             </div>
           ))}
+          {usesJsonArguments ? (
+            <p className="text-xs text-muted-foreground">
+              Use JSON for MCP arguments, including quotes around text.
+            </p>
+          ) : null}
+          {!validArgs ? (
+            <p role="alert" className="text-xs text-destructive">
+              Enter a valid JSON argument.
+            </p>
+          ) : null}
         </div>
       ) : null}
 
