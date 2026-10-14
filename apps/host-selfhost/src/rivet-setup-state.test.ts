@@ -9,7 +9,8 @@ import {
 const state = () =>
   decodeSetupStatus({
     phoneConnected: true,
-    phoneEndpoint: "wss://phone.example.test/phone",
+    phoneEndpoint: "wss://phone.example.test:8778/phone",
+    setupEndpoint: "https://setup.example.test:8779/setup",
     googleConfigured: true,
     googleSessionPresent: false,
     googleAuthenticated: false,
@@ -18,10 +19,10 @@ const state = () =>
     google: null,
   });
 describe("Rivet setup state", () => {
-  it("local Google sign-in stays bound to the phone host and current one-time attempt", () => {
+  it("local Google sign-in stays bound to the separate setup listener and current one-time attempt", () => {
     const uri = new URL("rivet-pair://google");
     const id = "00000000-0000-4000-8000-000000000001";
-    uri.searchParams.set("endpoint", "https://phone.example.test/setup/google/credentials");
+    uri.searchParams.set("endpoint", "https://setup.example.test:8779/setup/google/credentials");
     uri.searchParams.set("id", id);
     uri.hash = "b".repeat(64);
     const local = {

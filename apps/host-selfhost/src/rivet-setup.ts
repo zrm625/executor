@@ -7,8 +7,11 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { Schema } from "effect";
 
+import { SetupStatusSchema } from "../web/rivet-setup-state";
+
 import type { BetterAuthHandle } from "./auth/better-auth";
 
+const decodeStatus = Schema.decodeUnknownSync(SetupStatusSchema);
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 export interface RivetSetupConfig {
@@ -19,7 +22,7 @@ export interface RivetSetupConfig {
   readonly browserOrigin: string;
 }
 
-export function rivetSetupConfig(): RivetSetupConfig | null {
+export function rivetSetupConfig(resolvedBrowserOrigin: string): RivetSetupConfig | null {
   let configured: Partial<RivetSetupConfig> = {};
   const path = process.env.EXECUTOR_RIVET_SETUP_CONFIG_FILE;
   if (path) {
@@ -54,7 +57,7 @@ export function rivetSetupConfig(): RivetSetupConfig | null {
   const endpoint = configured.endpoint ?? process.env.EXECUTOR_RIVET_SETUP_ENDPOINT;
   const tokenFile = configured.tokenFile ?? process.env.EXECUTOR_RIVET_SETUP_TOKEN_FILE;
   const ownerId = configured.ownerId ?? process.env.EXECUTOR_RIVET_SETUP_OWNER_ID;
-  const origin = configured.browserOrigin ?? process.env.EXECUTOR_WEB_BASE_URL;
+  const origin = configured.browserOrigin ?? resolvedBrowserOrigin;
   if (!endpoint || !tokenFile || !ownerId || !origin) return null;
   const url = new URL(endpoint);
   if (
@@ -120,7 +123,11 @@ async function setupRequest(
   headers: Record<string, string>,
   body?: string,
 ) {
-  const addresses = await lookup(url.hostname, { all: true });
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  const family = isIP(hostname);
+  const addresses = family
+    ? [{ address: hostname, family }]
+    : await lookup(hostname, { all: true });
   if (addresses.length === 0 || addresses.some((entry) => !isPrivateSetupAddress(entry.address)))
     throw new Error("Private setup destination required");
   const address = addresses.find((entry) => entry.family === 4) ?? addresses[0]!;
@@ -132,6 +139,8 @@ async function setupRequest(
         headers,
         signal: AbortSignal.timeout(40_000),
         family: address.family,
+        hostname,
+        ...(url.protocol === "https:" ? { servername: isIP(hostname) ? "" : hostname } : {}),
         lookup: (_hostname, _options, callback) => callback(null, address.address, address.family),
       },
       (upstream) => {
@@ -188,7 +197,7 @@ const response = (status: number, body: unknown) =>
 /** Separate owner management bridge; normal MCP credentials never enter this path. */
 export function makeRivetSetupHandler(
   betterAuth: BetterAuthHandle,
-  config: () => RivetSetupConfig | null = rivetSetupConfig,
+  config: () => RivetSetupConfig | null,
 ) {
   return async (request: Request): Promise<Response> => {
     let settings: RivetSetupConfig | null;
@@ -249,6 +258,16 @@ export function makeRivetSetupHandler(
         },
         body,
       );
+      if ([401, 403].includes(upstream.status))
+        return response(502, { error: "SETUP_UPSTREAM_AUTHORIZATION_FAILED" });
+      if (upstream.status === 404)
+        return response(502, { error: "SETUP_UPSTREAM_ROUTE_UNAVAILABLE" });
+      if (request.method === "GET" && path[2] === "status" && upstream.status === 200) {
+        const status = decodeStatus(upstream.value);
+        if (new URL(status.setupEndpoint).href !== new URL(settings.endpoint).href)
+          return response(502, { error: "SETUP_ENDPOINT_MISMATCH" });
+        return response(200, status);
+      }
       return response(upstream.status, upstream.value);
     } catch {
       return response(502, { error: "SETUP_SERVICE_UNAVAILABLE" });

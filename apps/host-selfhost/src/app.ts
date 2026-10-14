@@ -16,7 +16,7 @@ import { selfHostDataMigrations } from "./db/data-migrations";
 import { makeSelfHostAdminApiLayer } from "./admin/handlers";
 import { makeSelfHostAdminUsersApiLayer } from "./admin/admin-users-api";
 import { makeSelfHostSystemApiLayer } from "./system/handlers";
-import { makeRivetSetupHandler } from "./rivet-setup";
+import { makeRivetSetupHandler, rivetSetupConfig } from "./rivet-setup";
 import { selfHostAccountMiddleware } from "./account";
 import { loadConfig, SELF_HOST_NAMESPACE, SELF_HOST_SCHEMA_VERSION } from "./config";
 import { createSelfHostDb, SelfHostDb, SelfHostDbProvider } from "./db/self-host-db";
@@ -130,7 +130,9 @@ export const makeSelfHostApp = async (options: MakeSelfHostAppOptions = {}) => {
         HttpRouter.add(
           "*",
           "/api/rivet-setup/*",
-          HttpEffect.fromWebHandler(makeRivetSetupHandler(betterAuth)),
+          HttpEffect.fromWebHandler(
+            makeRivetSetupHandler(betterAuth, () => rivetSetupConfig(config.webBaseUrl)),
+          ),
         ),
         // App-local admin (invite-code) API, served under /api/admin/*.
         makeSelfHostAdminApiLayer({ betterAuth, db: dbHandle, mountPrefix: "/api" }),

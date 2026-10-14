@@ -137,7 +137,7 @@ export function RivetSetupPanel(props: { readonly integration: string }) {
   if (!status)
     return error ? (
       <section aria-label="Rivet setup">
-        <p>{error}</p>
+        <p role="alert">{error}</p>
         <Button
           onClick={() =>
             void act(async () => {

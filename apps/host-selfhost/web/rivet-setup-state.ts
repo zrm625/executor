@@ -3,6 +3,7 @@ import { Schema } from "effect";
 export const SetupStatusSchema = Schema.Struct({
   phoneConnected: Schema.Boolean,
   phoneEndpoint: Schema.String,
+  setupEndpoint: Schema.String,
   googleConfigured: Schema.Boolean,
   googleSessionPresent: Schema.Boolean,
   googleAuthenticated: Schema.Boolean,
@@ -43,12 +44,21 @@ export function localSignInUrl(status: SetupStatus): string | null {
     Date.now() >= status.google.expiresAt
   )
     return null;
-  if (!URL.canParse(status.google.handoff) || !URL.canParse(status.phoneEndpoint)) return null;
+  if (!URL.canParse(status.google.handoff) || !URL.canParse(status.setupEndpoint)) return null;
   const uri = new URL(status.google.handoff);
   const rawEndpoint = uri.searchParams.get("endpoint") ?? "";
   if (!URL.canParse(rawEndpoint)) return null;
   const endpoint = new URL(rawEndpoint);
-  const phone = new URL(status.phoneEndpoint);
+  const setup = new URL(status.setupEndpoint);
+  if (
+    setup.protocol !== "https:" ||
+    setup.username ||
+    setup.password ||
+    setup.search ||
+    setup.hash ||
+    setup.pathname !== "/setup"
+  )
+    return null;
   return uri.protocol === "rivet-pair:" &&
     uri.hostname === "google" &&
     !uri.pathname &&
@@ -59,10 +69,9 @@ export function localSignInUrl(status: SetupStatus): string | null {
     uri.searchParams.get("id") === status.google.id &&
     /^[a-f0-9]{64}$/.test(uri.hash.slice(1)) &&
     endpoint.protocol === "https:" &&
-    endpoint.host === phone.host &&
+    endpoint.origin === setup.origin &&
     !endpoint.username &&
     !endpoint.password &&
-    !endpoint.port &&
     !endpoint.search &&
     !endpoint.hash &&
     endpoint.pathname === "/setup/google/credentials"

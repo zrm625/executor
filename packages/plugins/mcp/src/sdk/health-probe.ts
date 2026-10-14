@@ -49,12 +49,12 @@ export const classifyMcpHealthProbe = (
       detail: code ? `Health probe failed: ${code}.` : "MCP health probe returned an error.",
     };
   }
-  const text = envelope.content
+  const json = envelope.content
     .map((item) => Option.getOrUndefined(decodeText(item)))
-    .find((item) => item !== undefined)?.text;
-  const body =
-    envelope.structuredContent ??
-    (text === undefined ? undefined : Option.getOrUndefined(decodeJson(text)));
+    .filter(Predicate.isNotUndefined)
+    .map((item) => decodeJson(item.text))
+    .find(Option.isSome);
+  const body = envelope.structuredContent ?? (json && Option.getOrUndefined(json));
   const identity = extractIdentity(body, identityField);
   return {
     status: "healthy",

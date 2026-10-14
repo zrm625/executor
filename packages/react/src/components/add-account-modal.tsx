@@ -1,3 +1,4 @@
+import { parseHealthCheckArgs } from "../lib/health-check-args";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAtomRefresh, useAtomSet, useAtomValue } from "@effect/atom-react";
 import * as Exit from "effect/Exit";
@@ -1737,7 +1738,8 @@ function AddAccountModalView(props: AddAccountModalProps) {
   const canCheckKey = !isOAuth && !isNoAuth && (hasHealthCheck || healthCheckCandidates.length > 0);
   // Pick mode's probe is runnable once an operation is chosen and its required
   // args are filled.
-  const hcCandidateReady = hcOperation.length > 0 && !hcMissingRequired;
+  const hcParsedArgs = parseHealthCheckArgs(hcArgs, hcSelected?.parameters);
+  const hcCandidateReady = hcOperation.length > 0 && !hcMissingRequired && hcParsedArgs.ok;
 
   // The distinct credential inputs the selected method needs — one per variable
   // across its placements. A single-input method yields one field (`token`); a
@@ -2172,12 +2174,10 @@ function AddAccountModalView(props: AddAccountModalProps) {
 
   const candidateHealthSpec = (): HealthCheckSpec | null => {
     if (!hcCandidateReady) return null;
-    const argEntries = Object.entries(hcArgs)
-      .map(([key, value]) => [key, value.trim()] as const)
-      .filter(([, value]) => value.length > 0);
+    if (!hcParsedArgs.ok) return null;
     return {
       operation: hcOperation,
-      ...(argEntries.length > 0 ? { args: Object.fromEntries(argEntries) } : {}),
+      ...(Object.keys(hcParsedArgs.args).length > 0 ? { args: hcParsedArgs.args } : {}),
     };
   };
 

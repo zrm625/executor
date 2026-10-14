@@ -2,10 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { createServer } from "node:net";
 
 import { afterAll, describe, expect, it, test } from "@effect/vitest";
-import { createEmulator } from "@executor-js/emulate";
+import { connectEmulator } from "@executor-js/emulate";
+import { Schema } from "effect";
 
 import { mintInviteCode } from "../testing/mint-invite";
 
@@ -18,14 +18,21 @@ import { mintInviteCode } from "../testing/mint-invite";
 const BASE = "http://localhost:4788";
 const CALLBACK = `${BASE}/api/auth/oauth2/callback/okta`;
 
-const reservation = createServer();
-await new Promise<void>((resolve) => reservation.listen(0, "127.0.0.1", resolve));
-const address = reservation.address();
-// oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: the local IdP fixture requires a real listener port
-if (!address || typeof address === "string") throw new Error("Missing emulator port");
-await new Promise<void>((resolve) => reservation.close(() => resolve()));
-const idp = await createEmulator({ service: "okta", port: address.port });
-afterAll(() => idp.close());
+// Owner policy requires a private per-run hosted instance, not a released port reservation.
+const created = await fetch("https://okta.emulators.dev/_emulate/instances", {
+  method: "POST",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ instance: "selfhost-public-oidc" }),
+  signal: AbortSignal.timeout(10_000),
+});
+// oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: a failed synthetic hosted control-plane request must fail fixture setup
+if (!created.ok) throw new Error(`Synthetic Okta instance creation failed: HTTP ${created.status}`);
+const instance = Schema.decodeUnknownSync(Schema.Struct({ providerBaseUrl: Schema.String }))(
+  await created.json(),
+);
+const client = await connectEmulator({ service: "okta", baseUrl: instance.providerBaseUrl });
+const idp = { url: instance.providerBaseUrl };
+afterAll(() => client.reset());
 
 const registration = await fetch(`${idp.url}/oauth2/v1/clients`, {
   method: "POST",
@@ -247,6 +254,7 @@ const formFields = (form: string): Record<string, string> => {
 // consent page (pick the account's form) -> callback back into the app.
 // Returns the callback response plus the cookies it set.
 const signInThroughIdp = async (email: string) => {
+  await client.ledger.clear();
   const start = await handler(
     new Request(`${BASE}/api/auth/sign-in/oauth2`, {
       method: "POST",
@@ -257,6 +265,8 @@ const signInThroughIdp = async (email: string) => {
   expect(start.status).toBe(200);
   const { url } = (await start.json()) as { url: string };
   expect(url.startsWith(idp.url)).toBe(true);
+  expect(new URL(url).searchParams.get("code_challenge_method")).toBe("S256");
+  expect(new URL(url).searchParams.get("code_challenge")).toBeTruthy();
   const stateCookies = start.headers
     .getSetCookie()
     .map((cookie) => cookie.split(";")[0]!)
@@ -279,6 +289,16 @@ const signInThroughIdp = async (email: string) => {
   expect(callbackUrl.startsWith(CALLBACK)).toBe(true);
 
   const callback = await handler(new Request(callbackUrl, { headers: { cookie: stateCookies } }));
+  const ledger = await client.ledger.list();
+  expect(
+    ledger.some((entry) => /\/authorize$/.test(entry.path) && entry.response.status === 200),
+  ).toBe(true);
+  const token = ledger.find(
+    (entry) => /\/token$/.test(entry.path) && entry.response.status === 200,
+  );
+  expect(token).toBeDefined();
+  expect(JSON.stringify(token!.request.body)).toContain("code_verifier");
+  expect(JSON.stringify(token!.request.body)).not.toContain("client_secret");
   const cookies = callback.headers
     .getSetCookie()
     .map((cookie) => cookie.split(";")[0]!)

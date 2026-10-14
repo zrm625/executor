@@ -21,4 +21,7 @@ Public PKCE preserves password login and existing account-linking policy. Config
 the current SSO variables under separate operator authority; source changes do not
 alter deployed settings. The Okta emulator tests exercise public and confidential
 discovery, authorization, callback, admission denial, and membership using synthetic
-accounts.
+accounts. New public-client tests use a private per-run hosted instance created
+through `/_emulate/instances` and assert authorize/token request-ledger evidence,
+including PKCE and omission of the client secret. That test requires the synthetic
+hosted control plane to be reachable; a local in-process IdP is not its substitute.

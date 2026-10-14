@@ -1,3 +1,4 @@
+import { compatibleHealthCandidates, type McpHealthOperation } from "./health-candidates";
 import { Effect, Layer, Option, Result, Schema } from "effect";
 import type { HttpClient } from "effect/unstable/http";
 
@@ -9,7 +10,6 @@ import {
   authToolFailure,
   ElicitationDeclinedError,
   ToolAddress,
-  projectResponseFields,
   AuthTemplateSlug,
   ConnectionName,
   definePlugin,
@@ -24,7 +24,6 @@ import {
   type AuthMethodDescriptor,
   classifyHttpStatus,
   type HealthCheckResult,
-  type HealthCheckCandidate,
   type Integration,
   type IntegrationConfig,
   type IntegrationRecord,
@@ -79,12 +78,6 @@ import {
   type McpStdioEnvMethod,
   type McpStdioIntegrationConfig,
 } from "./types";
-
-const decodeRequiredFields = Schema.decodeUnknownOption(
-  Schema.Struct({ required: Schema.optional(Schema.Array(Schema.String)) }),
-);
-const schemaRequiredFields = (input: unknown): readonly string[] =>
-  Option.getOrUndefined(decodeRequiredFields(input))?.required ?? [];
 
 const MCP_PLUGIN_ID = "mcp" as const;
 
@@ -1946,7 +1939,7 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
     listHealthCheckCandidates: ({ ctx, integration }) =>
       Effect.gen(function* () {
         const connections = yield* ctx.connections.list({ integration: integration.slug });
-        const candidates = new Map<string, HealthCheckCandidate>();
+        const catalogs: McpHealthOperation[][] = [];
         for (const connection of connections) {
           const tools = yield* ctx.connections
             .refresh({
@@ -1955,26 +1948,21 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
               name: connection.name,
             })
             .pipe(Effect.orElseSucceed(() => []));
-          for (const tool of tools) {
-            const stamp = readStamp(tool.annotations);
-            if (stamp?.upstream?.readOnlyHint !== true || stamp.upstream.destructiveHint === true)
-              continue;
-            candidates.set(stamp.toolName, {
-              operation: stamp.toolName,
-              method: "mcp",
-              destructive: false,
-              requiredArgCount: schemaRequiredFields(tool.inputSchema).length,
-              summary: tool.description,
-              parameters: schemaRequiredFields(tool.inputSchema).map((name) => ({
-                name,
-                location: "argument",
-                required: true,
-              })),
-              responseFields: projectResponseFields(tool.outputSchema),
-            });
-          }
+          catalogs.push(
+            tools.map((tool) => {
+              const stamp = readStamp(tool.annotations);
+              return {
+                name: stamp?.toolName ?? String(tool.name),
+                description: tool.description,
+                inputSchema: tool.inputSchema,
+                outputSchema: tool.outputSchema,
+                readOnly: stamp?.upstream?.readOnlyHint === true,
+                destructive: stamp?.upstream?.destructiveHint === true,
+              };
+            }),
+          );
         }
-        return [...candidates.values()];
+        return compatibleHealthCandidates(catalogs);
       }),
 
     // Without a spec, preserve discovery health. With one, invoke only that
@@ -2074,12 +2062,22 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
           ),
         );
       }).pipe(
-        Effect.catchTag("McpInvocationError", () =>
+        Effect.catchTag("McpInvocationError", (error) =>
           Effect.succeed({
-            status: "degraded" as const,
+            status:
+              error.insufficientScope === true
+                ? ("misconfigured" as const)
+                : error.status === 401 || error.status === 403
+                  ? ("expired" as const)
+                  : ("degraded" as const),
+            ...(error.status !== undefined ? { httpStatus: error.status } : {}),
             checkedAt: Date.now(),
-            detail: "MCP health tool invocation failed.",
-            reason: "probe_failed" as const,
+            detail:
+              error.insufficientScope === true
+                ? "MCP health probe requires additional scope. Update the credential grants."
+                : "MCP health tool invocation failed.",
+            reason:
+              error.status !== undefined ? ("upstream_status" as const) : ("probe_failed" as const),
           } satisfies HealthCheckResult),
         ),
         Effect.catchTag("McpOAuthReauthorizationRequired", () =>

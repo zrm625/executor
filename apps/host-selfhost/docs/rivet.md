@@ -7,7 +7,12 @@ Google sign-in opens the installed Rivet helper on a nearby computer.
 
 Set `EXECUTOR_RIVET_SETUP_CONFIG_FILE` to an absolute owner-only JSON file with
 `endpoint`, `tokenFile`, `ownerId`, `integration`, and `browserOrigin`. The endpoint
-ends in `/setup`; it must use HTTPS except for local fixtures. Its DNS addresses
+ends in `/setup` and must match the producer's `RIVET_SETUP_ENDPOINT`.
+Management uses the MCP listener, normally 8779, independently of the phone's
+8778 listener. Status includes both `setupEndpoint` and `phoneEndpoint`; the proxy
+rejects a mismatched management endpoint before the browser can display a handoff.
+Explicit HTTPS ports and private IPv6 literals are supported. It must use HTTPS
+except for local fixtures. Its DNS addresses
 must all be private. Requests pin one address and family, retain TLS hostname
 validation, refuse redirects, and bound request and response sizes.
 
@@ -15,7 +20,10 @@ The token file contains a separate 64-character hexadecimal management credentia
 It must belong to the service account and be private, regular, and not a symlink
 or hard link. Keep it separate from the phone and ordinary MCP credentials. It
 never reaches the browser. Only the configured existing `ownerId` may manage setup,
-regardless of instance role. Browser POSTs require the exact configured origin.
+regardless of instance role. If `browserOrigin` is omitted, the server uses its
+resolved canonical browser URL, including platform and localhost defaults.
+Upstream authorization or missing-route failures keep an owner retry UI; only
+local missing configuration or owner/session denial hides setup. Browser POSTs require the exact configured origin.
 Unconfigured integrations hide the panel and return 404. Invalid configuration
 fails closed. Equivalent `EXECUTOR_RIVET_SETUP_*` server variables are supported.
 
@@ -26,7 +34,11 @@ an old pairing failure. Authentication is point-in-time evidence.
 
 For MCP health, select an explicit read-only operation such as `texts_gm_health`.
 Discovery alone reports connection health and does not authenticate Google. The
-plugin does not invoke candidates while listing them. Execution errors produce
+plugin does not invoke candidates while listing them. Candidate operations must be compatible and read-only across every connection.
+Pinned MCP arguments use JSON values, including numbers, booleans, arrays,
+objects, and a literal argument named `body`. Call-time credential rejection is
+expired; a scope shortfall requires broader grants rather than the same login.
+Execution errors produce
 bounded diagnostics without persisting arbitrary error content.
 
 ## Validate with synthetic fixtures
@@ -41,7 +53,10 @@ Rivet checkout, set `RIVET_SETUP_DEMO_DIR` to a new private directory under `/tm
 and run `tsx scripts/setup-demo.ts`. Its `ready.json` provides the loopback endpoint.
 Set `E2E_RIVET_SETUP_DIRECTORY`, `E2E_RIVET_SETUP_URL`, and
 `EXECUTOR_RIVET_SETUP_CONFIG_FILE` to that fixture's directory, URL, and a new JSON
-file inside the directory. Then run from `e2e`:
+file inside the directory. Trust only the new fixture certificate by starting the
+Executor process with `NODE_EXTRA_CA_CERTS` set to `ready.json`'s certificate path.
+The fixture uses two separate HTTPS/WSS loopback listeners and rejects a reused
+fixture directory. Then run from `e2e`:
 
 ```sh
 ../node_modules/.bin/vitest run --project selfhost selfhost/rivet-setup-ui.test.ts
@@ -50,7 +65,9 @@ file inside the directory. Then run from `e2e`:
 The scenario creates a fresh Executor session and synthetic phone/account state.
 It records QR display, phone connection, cancel/retry, single-use local handoff,
 emoji confirmation, and verification. It does not launch a real Google login or
-read a phone. Stop the fixture before removing its disposable state. Without the
+read a phone. Use a fresh fixture per run. The scenario removes its owner/config/phone-confirmation
+sentinels in `Effect.ensuring`, including early failures. The controller must stop
+and await its fixture process, then remove that exact disposable directory. Without the
 native fixture, the cross-repository scenario reports its prerequisite as a skip.
 
 ## Source delivery and rollout

@@ -6,6 +6,7 @@ import {
   rankResponseSample,
   type AuthTemplateSlug,
   type HealthCheckCandidate,
+  type HealthCheckCandidateParameter,
   type HealthCheckResult,
   type HealthCheckSpec,
   type IntegrationSlug,
@@ -22,7 +23,11 @@ import {
 import { healthCheckWriteKeys } from "../api/reactivity-keys";
 import { messageFromExit } from "../api/error-reporting";
 import { HEALTH_STATUS_LABEL, HEALTH_TEXT_CLASS } from "../lib/health-display";
-import { formatHealthCheckArgs, parseHealthCheckArgs } from "../lib/health-check-args";
+import {
+  formatHealthCheckArgs,
+  parseHealthCheckArgs,
+  isJsonHealthArgument,
+} from "../lib/health-check-args";
 import { Button } from "./button";
 import { FreeformCombobox, type FreeformComboboxOption } from "./combobox";
 import { Input } from "./input";
@@ -143,7 +148,10 @@ function HealthCheckConfigFields(props: {
   );
 
   const pinnedParams = useMemo(
-    () => (selected?.parameters ?? []).filter((p) => p.required || p.location === "body"),
+    () =>
+      (selected?.parameters ?? []).filter(
+        (p) => p.required || p.location === "body" || p.valueFormat === "json",
+      ),
     [selected],
   );
 
@@ -194,20 +202,20 @@ function HealthCheckConfigFields(props: {
                   {param.required ? ", required" : ", optional"})
                 </span>
               </Label>
-              {param.location === "body" ? (
+              {isJsonHealthArgument(param.name, selected?.parameters) ? (
                 <>
                   <Textarea
                     id={`${idPrefix}-arg-${param.name}`}
                     value={args[param.name] ?? ""}
                     onChange={(e) => props.onArgChange(param.name, e.target.value)}
                     placeholder='{"pageSize": 1}'
-                    aria-label="Request body (JSON)"
-                    aria-invalid={!parseHealthCheckArgs(args).ok}
+                    aria-label={`${param.name} (JSON)`}
+                    aria-invalid={!parseHealthCheckArgs(args, selected?.parameters).ok}
                     disabled={disabled}
                     className="font-mono text-xs"
                   />
-                  {!parseHealthCheckArgs(args).ok ? (
-                    <p className="text-xs text-destructive">Enter a valid JSON request body.</p>
+                  {!parseHealthCheckArgs(args, selected?.parameters).ok ? (
+                    <p className="text-xs text-destructive">Enter a valid JSON argument.</p>
                   ) : null}
                 </>
               ) : (
@@ -263,6 +271,7 @@ function HealthCheckConfigFields(props: {
 function HealthCheckLivePreviewBlock(props: {
   readonly integration: IntegrationSlug;
   readonly preview: HealthCheckLivePreview;
+  readonly parameters?: readonly HealthCheckCandidateParameter[];
   readonly operation: string;
   readonly identityField: string;
   readonly args: Record<string, string>;
@@ -282,7 +291,7 @@ function HealthCheckLivePreviewBlock(props: {
     const slug = (template || preview.templates[0]?.template) as AuthTemplateSlug | undefined;
     if (slug === undefined) return;
     const identity = identityField.trim();
-    const parsedArgs = parseHealthCheckArgs(args);
+    const parsedArgs = parseHealthCheckArgs(args, props.parameters);
     if (!parsedArgs.ok) return;
     const spec: HealthCheckSpec = {
       operation,
@@ -419,7 +428,12 @@ function HealthCheckEditorSheet(props: {
     if (!open) return;
     setOperation(spec?.operation ?? candidates[0]?.operation ?? "");
     setIdentityField(spec?.identityField ?? "");
-    setArgs(formatHealthCheckArgs(spec?.args));
+    setArgs(
+      formatHealthCheckArgs(
+        spec?.args,
+        candidates.find((c) => c.operation === spec?.operation)?.parameters,
+      ),
+    );
   }, [open, spec, candidates]);
 
   const selected = useMemo(
@@ -432,7 +446,7 @@ function HealthCheckEditorSheet(props: {
     [selected],
   );
   const missingRequired = requiredParams.some((p) => (args[p.name] ?? "").trim().length === 0);
-  const parsedArgs = parseHealthCheckArgs(args);
+  const parsedArgs = parseHealthCheckArgs(args, selected?.parameters);
 
   const onOperationChange = (next: string) => {
     setOperation(next);
@@ -517,6 +531,7 @@ function HealthCheckEditorSheet(props: {
             <HealthCheckLivePreviewBlock
               integration={integration}
               preview={livePreview}
+              parameters={selected?.parameters}
               operation={operation}
               identityField={identityField}
               args={args}

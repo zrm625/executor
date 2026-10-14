@@ -24,7 +24,12 @@ scenario(
     const directory = process.env.E2E_RIVET_SETUP_DIRECTORY;
     const endpoint = process.env.E2E_RIVET_SETUP_URL;
     const configFile = process.env.EXECUTOR_RIVET_SETUP_CONFIG_FILE;
-    if (!directory || !endpoint || !configFile)
+    if (
+      !directory ||
+      !directory.startsWith("/tmp/rivet-executor-fixture-") ||
+      !endpoint ||
+      !configFile
+    )
       throw new Error("Native synthetic Rivet fixture is required");
     const identity = yield* target.newIdentity();
     const client = yield* makeClient(api, identity);
@@ -35,32 +40,38 @@ scenario(
       });
       return (await response.json()) as { user: { id: string } };
     });
-    writeFileSync(join(directory, "owner-id"), session.user.id, { mode: 0o600 });
-    writeFileSync(
-      configFile,
-      JSON.stringify({
-        endpoint: endpoint + "/setup",
-        tokenFile: join(directory, "setup.token"),
-        ownerId: session.user.id,
-        integration: slug,
-        browserOrigin: new URL(target.baseUrl).origin,
-      }),
-      { mode: 0o600 },
-    );
-    yield* client.mcp.addServer({
-      payload: {
-        name: "Synthetic Rivet setup",
-        slug,
-        transport: "remote",
-        endpoint: endpoint + "/mcp",
-        remoteTransport: "streamable-http",
-        headers: { Authorization: "Bearer " + "c".repeat(64) },
-      },
-    });
     yield* Effect.gen(function* () {
+      writeFileSync(join(directory, "owner-id"), session.user.id, { mode: 0o600 });
+      writeFileSync(
+        configFile,
+        JSON.stringify({
+          endpoint: endpoint + "/setup",
+          tokenFile: join(directory, "setup.token"),
+          ownerId: session.user.id,
+          integration: slug,
+          browserOrigin: new URL(target.baseUrl).origin,
+        }),
+        { mode: 0o600 },
+      );
+      yield* client.mcp.addServer({
+        payload: {
+          name: "Synthetic Rivet setup",
+          slug,
+          transport: "remote",
+          endpoint: endpoint + "/mcp",
+          remoteTransport: "streamable-http",
+          headers: { Authorization: "Bearer " + "c".repeat(64) },
+        },
+      });
       yield* browser.session(identity, async ({ page, step }) => {
         await step("Open Rivet setup on the integration page", async () => {
+          writeFileSync(join(directory, "setup.token"), "d".repeat(64), { mode: 0o600 });
           await page.goto(`/default/integrations/${slug}`, { waitUntil: "domcontentloaded" });
+          const retry = page.getByRole("button", { name: "Retry setup check" });
+          await retry.waitFor();
+          await page.getByRole("alert").waitFor();
+          writeFileSync(join(directory, "setup.token"), "b".repeat(64), { mode: 0o600 });
+          await retry.click();
           await page.getByRole("heading", { name: "Set up Rivet" }).waitFor();
           await page.getByText("Needs connection", { exact: true }).waitFor();
         });
@@ -99,7 +110,17 @@ scenario(
             ).toBe(0);
             // Synthetic credentials only. Real passkey interaction is a separate
             // acceptance gate; never invoke an OS handler in a recorded fixture.
-            const response = await fetch(endpoint + "/setup/google/credentials", {
+            const destination = uri.searchParams.get("endpoint")!;
+            expect(destination).toBe(endpoint + "/setup/google/credentials");
+            const status = await fetch(endpoint + "/setup/status", {
+              headers: {
+                Authorization: "Bearer " + "b".repeat(64),
+                "X-Rivet-Setup-Owner": session.user.id,
+              },
+            }).then((r) => r.json());
+            expect(status.setupEndpoint).toBe(endpoint + "/setup");
+            expect(new URL(status.phoneEndpoint).port).not.toBe(new URL(destination).port);
+            const response = await fetch(destination, {
               method: "POST",
               headers: {
                 Authorization: `Bearer ${uri.hash.slice(1)}`,
@@ -135,7 +156,14 @@ scenario(
       Effect.ensuring(
         Effect.gen(function* () {
           yield* client.mcp.removeServer({ params: { slug } }).pipe(Effect.ignore);
-          rmSync(configFile, { force: true });
+          for (const file of [
+            configFile,
+            join(directory, "owner-id"),
+            join(directory, "connect-phone.synthetic"),
+            join(directory, "gmessages", "confirm.synthetic"),
+          ])
+            rmSync(file, { force: true });
+          writeFileSync(join(directory, "setup.token"), "b".repeat(64), { mode: 0o600 });
         }),
       ),
     );
