@@ -1,3 +1,4 @@
+import { compatibleHealthCandidates, type McpHealthOperation } from "./health-candidates";
 import { Effect, Layer, Option, Result, Schema } from "effect";
 import type { HttpClient } from "effect/unstable/http";
 
@@ -7,6 +8,8 @@ import { callToolResultJsonSchema } from "./call-tool-result-schema.gen";
 
 import {
   authToolFailure,
+  ElicitationDeclinedError,
+  ToolAddress,
   AuthTemplateSlug,
   ConnectionName,
   definePlugin,
@@ -53,6 +56,7 @@ import {
   McpOAuthReauthorizationRequired,
   McpToolDiscoveryError,
 } from "./errors";
+import { classifyMcpHealthProbe } from "./health-probe";
 import { invokeMcpTool, isUnknownToolMessage } from "./invoke";
 import { deriveMcpNamespace, type McpToolManifestEntry } from "./manifest";
 import { mcpPresets } from "./presets";
@@ -1931,14 +1935,39 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
         return out;
       }),
 
-    // Liveness-only health check. MCP has no usable identity source (no
-    // id_token/userinfo, no standard whoami), so this answers "is this
-    // credential still alive?" by dialing the server and listing tools (the same
-    // path resolveTools uses); identity stays the user-supplied connection label.
-    // Only checkHealth is implemented (no candidates/describe/set), so the
-    // operation/identity editor stays hidden while the status dot + "Check now"
-    // light up.
-    checkHealth: ({ ctx, credential }) =>
+    // Discovery enumerates candidates without invoking them.
+    listHealthCheckCandidates: ({ ctx, integration }) =>
+      Effect.gen(function* () {
+        const connections = yield* ctx.connections.list({ integration: integration.slug });
+        const catalogs: McpHealthOperation[][] = [];
+        for (const connection of connections) {
+          const tools = yield* ctx.connections
+            .refresh({
+              owner: connection.owner,
+              integration: integration.slug,
+              name: connection.name,
+            })
+            .pipe(Effect.orElseSucceed(() => []));
+          catalogs.push(
+            tools.map((tool) => {
+              const stamp = readStamp(tool.annotations);
+              return {
+                name: stamp?.toolName ?? String(tool.name),
+                description: tool.description,
+                inputSchema: tool.inputSchema,
+                outputSchema: tool.outputSchema,
+                readOnly: stamp?.upstream?.readOnlyHint === true,
+                destructive: stamp?.upstream?.destructiveHint === true,
+              };
+            }),
+          );
+        }
+        return compatibleHealthCandidates(catalogs);
+      }),
+
+    // Without a spec, preserve discovery health. With one, invoke only that
+    // explicitly configured read-only operation and honor execution errors.
+    checkHealth: ({ ctx, credential, spec }) =>
       Effect.gen(function* () {
         const parsed = parseMcpIntegrationConfig(credential.config);
         if (!parsed) {
@@ -1978,9 +2007,49 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
         );
 
         return yield* discoverToolsFromInput(connector).pipe(
-          Effect.map(
-            () =>
-              ({ status: "healthy" as const, checkedAt: Date.now() }) satisfies HealthCheckResult,
+          Effect.flatMap(({ manifest }) =>
+            Effect.gen(function* () {
+              if (!spec)
+                return {
+                  status: "healthy" as const,
+                  checkedAt: Date.now(),
+                  detail: "MCP discovery only; no upstream session probe configured.",
+                } satisfies HealthCheckResult;
+              const tool = manifest.tools.find((tool) => tool.toolName === spec.operation);
+              if (
+                !tool ||
+                tool.annotations?.readOnlyHint !== true ||
+                tool.annotations.destructiveHint === true
+              )
+                return {
+                  status: "degraded" as const,
+                  checkedAt: Date.now(),
+                  detail:
+                    "Configured MCP health probe is unavailable or not read-only. Update the server or choose a different probe.",
+                  reason: "probe_failed" as const,
+                } satisfies HealthCheckResult;
+              const raw = yield* invokeMcpTool({
+                toolId: tool.toolId,
+                toolName: tool.toolName,
+                args: spec.args ?? {},
+                transport: parsed.transport,
+                connector: createMcpConnector(connector),
+                elicit: () =>
+                  Effect.fail(
+                    new ElicitationDeclinedError({
+                      address: ToolAddress.make(`health.${tool.toolId}`),
+                      action: "decline",
+                    }),
+                  ),
+              });
+              return classifyMcpHealthProbe(
+                raw,
+                spec.identityField,
+                Object.values(credential.values).filter(
+                  (v): v is string => typeof v === "string" && v.length > 0,
+                ),
+              );
+            }),
           ),
           Effect.catchTag("McpToolDiscoveryError", (error) =>
             Effect.succeed({
@@ -1993,6 +2062,32 @@ export const mcpPlugin = definePlugin((options?: McpPluginOptions) => {
           ),
         );
       }).pipe(
+        Effect.catchTag("McpInvocationError", (error) =>
+          Effect.succeed({
+            status:
+              error.insufficientScope === true
+                ? ("misconfigured" as const)
+                : error.status === 401 || error.status === 403
+                  ? ("expired" as const)
+                  : ("degraded" as const),
+            ...(error.status !== undefined ? { httpStatus: error.status } : {}),
+            checkedAt: Date.now(),
+            detail:
+              error.insufficientScope === true
+                ? "MCP health probe requires additional scope. Update the credential grants."
+                : "MCP health tool invocation failed.",
+            reason:
+              error.status !== undefined ? ("upstream_status" as const) : ("probe_failed" as const),
+          } satisfies HealthCheckResult),
+        ),
+        Effect.catchTag("McpOAuthReauthorizationRequired", () =>
+          Effect.succeed({
+            status: "expired" as const,
+            checkedAt: Date.now(),
+            detail: "MCP OAuth reauthorization required.",
+            reason: "credential_refresh_rejected" as const,
+          } satisfies HealthCheckResult),
+        ),
         // buildConnectorInput rejects (e.g. stdio disabled / missing config).
         Effect.catchTag("McpConnectionError", (error) =>
           Effect.succeed({

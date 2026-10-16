@@ -3,6 +3,13 @@ import { useEffect, useState, type ReactNode } from "react";
 
 import { ExecutorProvider } from "@executor-js/react/api/provider";
 import { ExecutorPluginsProvider } from "@executor-js/sdk/client";
+import { IntegrationSetupProvider } from "@executor-js/react/components/integration-setup";
+import { RivetSetupPanel } from "../rivet-setup-panel";
+
+const renderIntegrationSetup = (integration: string) => (
+  <RivetSetupPanel key={integration} integration={integration} />
+);
+
 import { ArtifactRendererProvider } from "@executor-js/react/api/artifact-renderer";
 import { OrganizationProvider } from "@executor-js/react/api/organization-context";
 import { OrgSlugGate } from "@executor-js/react/multiplayer/org-slug-gate";
@@ -179,11 +186,13 @@ function AuthenticatedApp() {
             to select anyway. */}
         <OrganizationProvider organizationId={organization?.id ?? null}>
           <ArtifactRendererProvider loader={artifactRendererLoader}>
-            {organization ? (
-              <OrgSlugGate activeSlug={organization.slug}>{gated}</OrgSlugGate>
-            ) : (
-              gated
-            )}
+            <IntegrationSetupProvider render={renderIntegrationSetup}>
+              {organization ? (
+                <OrgSlugGate activeSlug={organization.slug}>{gated}</OrgSlugGate>
+              ) : (
+                gated
+              )}
+            </IntegrationSetupProvider>
           </ArtifactRendererProvider>
         </OrganizationProvider>
       </ExecutorPluginsProvider>

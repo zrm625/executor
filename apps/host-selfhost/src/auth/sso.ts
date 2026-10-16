@@ -36,7 +36,7 @@ export const isAdmitted = (
 export const ssoProviderConfig = (sso: SsoConfig) => ({
   providerId: sso.providerId,
   clientId: sso.clientId,
-  clientSecret: sso.clientSecret,
+  ...(sso.publicClient ? {} : { clientSecret: sso.clientSecret }),
   discoveryUrl: sso.discoveryUrl,
   scopes: ["openid", "email", "profile"],
   pkce: true,

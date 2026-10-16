@@ -25,7 +25,7 @@ export const SELF_HOST_SCHEMA_VERSION = "1.0.0";
  * allowlist is what replaces the invite code for SSO sign-ups (the domain IS
  * the invite), so it is required whenever the provider is enabled.
  */
-export interface SsoConfig {
+export type SsoConfig = {
   /** URL-safe id — also the OAuth callback path segment and the button key. */
   readonly providerId: string;
   /** Display name for the login button (“Continue with <name>”). */
@@ -33,10 +33,12 @@ export interface SsoConfig {
   /** The IdP's OIDC discovery document (…/.well-known/openid-configuration). */
   readonly discoveryUrl: string;
   readonly clientId: string;
-  readonly clientSecret: string;
   /** Lowercased email domains admitted without an invite code. */
   readonly allowedDomains: readonly string[];
-}
+} & (
+  | { readonly publicClient: true; readonly clientSecret?: never }
+  | { readonly publicClient: false; readonly clientSecret: string }
+);
 
 export interface SelfHostConfig {
   /** Bind address. Defaults to loopback. */
@@ -230,8 +232,13 @@ const PROVIDER_ID_PATTERN = /^[a-z0-9-]{1,48}$/;
 const resolveSso = (): SsoConfig | undefined => {
   const clientId = process.env.EXECUTOR_SSO_CLIENT_ID?.trim();
   const clientSecret = process.env.EXECUTOR_SSO_CLIENT_SECRET?.trim();
-  if (!clientId && !clientSecret) return undefined;
-  if (!clientId || !clientSecret) {
+  const publicClient = process.env.EXECUTOR_SSO_PUBLIC_CLIENT === "true";
+  if (publicClient && clientSecret) {
+    // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: public-client mode must not accidentally send a confidential credential
+    throw new Error("EXECUTOR_SSO_PUBLIC_CLIENT forbids EXECUTOR_SSO_CLIENT_SECRET");
+  }
+  if (!clientId && !clientSecret && !publicClient) return undefined;
+  if (!clientId || (!publicClient && !clientSecret)) {
     // oxlint-disable-next-line executor/no-try-catch-or-throw, executor/no-error-constructor -- boundary: refuse to boot on half-configured SSO credentials
     throw new Error("EXECUTOR_SSO_CLIENT_ID and EXECUTOR_SSO_CLIENT_SECRET must be set together");
   }
@@ -263,7 +270,10 @@ const resolveSso = (): SsoConfig | undefined => {
   const providerName =
     process.env.EXECUTOR_SSO_PROVIDER_NAME?.trim() ||
     providerId.charAt(0).toUpperCase() + providerId.slice(1);
-  return { providerId, providerName, discoveryUrl, clientId, clientSecret, allowedDomains };
+  const common = { providerId, providerName, discoveryUrl, clientId, allowedDomains };
+  return clientSecret
+    ? { ...common, publicClient: false, clientSecret }
+    : { ...common, publicClient: true };
 };
 
 // A malformed value is refused rather than silently ignored: an operator who
