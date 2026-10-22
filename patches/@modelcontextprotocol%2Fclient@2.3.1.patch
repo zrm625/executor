@@ -1,0 +1,32 @@
+diff --git a/dist/shimsWorkerd.cjs b/dist/shimsWorkerd.cjs
+index 0c278fb8135fdf1a8e9088fcfe28a3cf1d1730ed..5fe2a8a1afc99c4daa5f643167cadaf9d0f1939d 100644
+--- a/dist/shimsWorkerd.cjs
++++ b/dist/shimsWorkerd.cjs
+@@ -1,2 +1,1 @@
+-const require_src = require('./src-DpAS0jfg.cjs');
+ const require_cfWorkerProvider = require('./cfWorkerProvider-B3dvjU3F.cjs');
+@@ -7,7 +6,7 @@ const require_cfWorkerProvider = require('./cfWorkerProvider-B3dvjU3F.cjs');
+ *
+ * This file is selected via package.json export conditions when running in workerd.
+ */
+-require_src.preloadSchemas();
++/* executor-patch: no-preload-schemas - build schemas lazily on first use. */
+ /**
+ * Whether `fetch()` may throw `TypeError` due to CORS. CORS is a browser-only concept —
+ * in Cloudflare Workers, a `TypeError` from `fetch` is always a real network/configuration
+diff --git a/dist/shimsWorkerd.mjs b/dist/shimsWorkerd.mjs
+index ca6eda547bce1286c329c82b1dc415f28352b6ed..3b7ff8d3700184df2dd50d58399abe3fc85b357a 100644
+--- a/dist/shimsWorkerd.mjs
++++ b/dist/shimsWorkerd.mjs
+@@ -1,2 +1,1 @@
+-import { n as preloadSchemas } from "./src-WCy6ifGf.mjs";
+ import { t as CfWorkerJsonSchemaValidator } from "./cfWorkerProvider-BylNJ1R5.mjs";
+@@ -7,7 +6,7 @@ import { t as CfWorkerJsonSchemaValidator } from "./cfWorkerProvider-BylNJ1R5.mj
+ *
+ * This file is selected via package.json export conditions when running in workerd.
+ */
+-preloadSchemas();
++/* executor-patch: no-preload-schemas - build schemas lazily on first use. */
+ /**
+ * Whether `fetch()` may throw `TypeError` due to CORS. CORS is a browser-only concept —
+ * in Cloudflare Workers, a `TypeError` from `fetch` is always a real network/configuration
