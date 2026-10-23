@@ -64,7 +64,11 @@ const jsonRpcResult = (request: JsonRpcRequest, result: unknown) =>
 // scenario supplies that branch via a `CallToolResponder`.
 type CallToolResponder = (rpc: JsonRpcRequest) => ReturnType<typeof HttpServerResponse.text>;
 
-const callToolFixtureResponse = (rpc: JsonRpcRequest, callTool: CallToolResponder) => {
+const callToolFixtureResponse = (
+  rpc: JsonRpcRequest,
+  callTool: CallToolResponder,
+  readOnly = false,
+) => {
   if (rpc.method === "initialize") {
     return jsonRpcResult(rpc, {
       protocolVersion: "2025-06-18",
@@ -80,6 +84,7 @@ const callToolFixtureResponse = (rpc: JsonRpcRequest, callTool: CallToolResponde
       tools: [
         {
           name: "explode",
+          annotations: { readOnlyHint: readOnly },
           description: "Returns a failure from tools/call",
           inputSchema: { type: "object", properties: {} },
         },
@@ -92,7 +97,7 @@ const callToolFixtureResponse = (rpc: JsonRpcRequest, callTool: CallToolResponde
   return HttpServerResponse.text("Unexpected JSON-RPC method", { status: 400 });
 };
 
-const serveCallToolServer = (callTool: CallToolResponder) =>
+const serveCallToolServer = (callTool: CallToolResponder, readOnly = false) =>
   serveTestHttpApp((request) =>
     Effect.gen(function* () {
       if (request.method === "GET") {
@@ -102,7 +107,7 @@ const serveCallToolServer = (callTool: CallToolResponder) =>
       const body = yield* request.text.pipe(Effect.orDie);
       return Option.match(decodeJsonRpcRequest(body), {
         onNone: () => HttpServerResponse.text("Invalid JSON-RPC fixture request", { status: 400 }),
-        onSome: (rpc) => callToolFixtureResponse(rpc, callTool),
+        onSome: (rpc) => callToolFixtureResponse(rpc, callTool, readOnly),
       });
     }),
   );
@@ -256,10 +261,11 @@ const seedCallToolExecutor = (input: {
    *  transport gets a real authProvider — the production OAuth path where the
    *  SDK's own challenge handling would otherwise swallow scope signals. */
   oauth?: boolean;
+  readOnly?: boolean;
 }) =>
   Effect.acquireRelease(
     Effect.gen(function* () {
-      const server = yield* serveCallToolServer(input.callTool);
+      const server = yield* serveCallToolServer(input.callTool, input.readOnly);
       const config = makeTestConfig({
         plugins: [memoryCredentialsPlugin(), mcpPlugin()] as const,
       });
@@ -999,6 +1005,77 @@ describe("mcpPlugin", () => {
     );
   }
 
+  for (const status of [401, 403, 500] as const) {
+    it.effect(`classifies HTTP ${status} at health tools/call without replaying it`, () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          let calls = 0;
+          const slug = `health_call_status_${status}`;
+          const { executor } = yield* seedCallToolExecutor({
+            slug,
+            readOnly: true,
+            callTool: (rpc) => {
+              calls++;
+              return httpStatusCallTool(status)(rpc);
+            },
+          });
+          const result = yield* executor.connections.validate({
+            owner: "org",
+            integration: IntegrationSlug.make(slug),
+            template: TEMPLATE,
+            value: "",
+            spec: { operation: "explode" },
+          });
+          expect(result).toMatchObject({
+            status: status === 500 ? "degraded" : "expired",
+            httpStatus: status,
+            reason: "upstream_status",
+          });
+          expect(JSON.stringify(result)).not.toContain("do-not-leak");
+          expect(calls).toBe(1);
+        }),
+      ),
+    );
+  }
+  it.effect(
+    "reports a health tools/call scope shortfall without asking for the same grant again",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const slug = "health_call_scope";
+          let calls = 0;
+          const { executor } = yield* seedCallToolExecutor({
+            slug,
+            readOnly: true,
+            oauth: true,
+            callTool: () => {
+              calls++;
+              return HttpServerResponse.text("private synthetic detail", {
+                status: 403,
+                headers: {
+                  "www-authenticate": 'Bearer error="insufficient_scope", scope="health.read"',
+                },
+              });
+            },
+          });
+          const result = yield* executor.connections.validate({
+            owner: "org",
+            integration: IntegrationSlug.make(slug),
+            template: AuthTemplateSlug.make("oauth2"),
+            value: "static-access-token",
+            spec: { operation: "explode" },
+          });
+          expect(result).toMatchObject({
+            status: "misconfigured",
+            httpStatus: 403,
+            reason: "upstream_status",
+          });
+          expect(result.detail).toContain("additional scope");
+          expect(JSON.stringify(result)).not.toContain("private synthetic detail");
+          expect(calls).toBe(1);
+        }),
+      ),
+  );
   // The lone-401 replay above is restricted to read-only methods. A
   // `tools/call` may have executed its side effect before the server answered
   // 401 (HTTP gives no such guarantee), so the adapter must never re-send it

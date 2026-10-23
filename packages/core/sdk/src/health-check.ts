@@ -159,6 +159,8 @@ export const HealthCheckCandidateParameter = Schema.Struct({
   name: Schema.String,
   /** Where the parameter is carried (e.g. "query", "path", "header"). */
   location: Schema.String,
+  /** JSON editing preserves MCP scalar, array, and object argument types. */
+  valueFormat: Schema.optional(Schema.Literal("json")),
   required: Schema.Boolean,
   description: Schema.optional(Schema.String),
 });
