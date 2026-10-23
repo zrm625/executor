@@ -65,7 +65,7 @@
     "@executor-js/config": "workspace:*",
     "@executor-js/sdk": "workspace:*",
     "graphql": "^16.12.0",
-    "graphql-yoga": "^5.17.0"
+    "graphql-yoga": "^5.24.6"
   },
   "devDependencies": {
     "@effect/atom-react": "catalog:",

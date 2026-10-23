@@ -36,7 +36,7 @@
     "quickjs-emscripten": "catalog:"
   },
   "devDependencies": {
-    "@cloudflare/worker-bundler": "0.2.1",
+    "@cloudflare/worker-bundler": "0.2.6",
     "@effect/vitest": "catalog:",
     "@types/node": "catalog:",
     "bun-types": "catalog:",

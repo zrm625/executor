@@ -19,7 +19,7 @@
   },
   "dependencies": {
     "@better-auth/api-key": "^1.6.11",
-    "@cloudflare/worker-bundler": "0.2.1",
+    "@cloudflare/worker-bundler": "0.2.6",
     "@effect/atom-react": "catalog:",
     "@effect/platform-bun": "catalog:",
     "@executor-js/analytics": "workspace:*",

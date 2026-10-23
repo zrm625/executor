@@ -91,12 +91,12 @@
     "playwright-core": "^1.59.1",
     "react": "catalog:",
     "react-dom": "catalog:",
-    "recharts": "3.8.0",
+    "recharts": "3.8.1",
     "tailwindcss": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vite-plugin-singlefile": "^2.3.2",
     "vitest": "catalog:",
-    "zod": "4.3.6"
+    "zod": "4.6.7"
   }
 }
