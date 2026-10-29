@@ -32,7 +32,7 @@ import { DevicePage } from "../chromeless/device-page";
 import { McpConsentPage } from "../chromeless/mcp-consent-page";
 import { LoginPage } from "../login";
 import { SetupPage } from "../setup";
-import { fetchNeedsSetup } from "../setup-status";
+import { fetchSetupStatus, type SetupStatus } from "../setup-status";
 
 // ---------------------------------------------------------------------------
 // Self-host root: the SHARED multiplayer composition with Better Auth as the
@@ -119,16 +119,16 @@ function AuthGate({ children }: { children: ReactNode }) {
   // the server whether the instance still has zero members.
   const [setupStatus, setSetupStatus] = useState<
     | { state: "checking"; attempt: number }
-    | { state: "ready"; needsSetup: boolean }
+    | { state: "ready"; value: SetupStatus }
     | { state: "error"; attempt: number }
   >({ state: "checking", attempt: 0 });
   useEffect(() => {
     if (auth.status !== "unauthenticated") return;
     let alive = true;
     setSetupStatus((current) => ({ state: "checking", attempt: current.attempt }));
-    void fetchNeedsSetup().then(
+    void fetchSetupStatus().then(
       (value) => {
-        if (alive) setSetupStatus({ state: "ready", needsSetup: value });
+        if (alive) setSetupStatus({ state: "ready", value });
       },
       () => {
         if (alive) {
@@ -159,7 +159,15 @@ function AuthGate({ children }: { children: ReactNode }) {
         />
       );
     }
-    return setupStatus.needsSetup ? <SetupPage /> : <LoginPage />;
+    return setupStatus.value.needsSetup && !setupStatus.value.oidcEnabled ? (
+      <SetupPage />
+    ) : (
+      <LoginPage
+        oidcEnabled={setupStatus.value.oidcEnabled}
+        oidcProviderName={setupStatus.value.oidcProviderName}
+        passwordSignInEnabled={setupStatus.value.passwordSignInEnabled}
+      />
+    );
   }
   return <>{children}</>;
 }
