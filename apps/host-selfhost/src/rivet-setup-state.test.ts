@@ -4,6 +4,7 @@ import {
   setupActive,
   setupInstruction,
   localSignInUrl,
+  googleSignInRejected,
 } from "../web/rivet-setup-state";
 
 const state = () =>
@@ -19,6 +20,13 @@ const state = () =>
     google: null,
   });
 describe("Rivet setup state", () => {
+  it("retains a rejected saved session and directs recovery to its owner", () => {
+    const rejected = { ...state(), googleSessionPresent: true, error: "GM_REPAIR_REQUIRED" };
+    expect(googleSignInRejected(rejected)).toBe(true);
+    expect(setupInstruction(rejected)).toContain("Ask the service owner to reconnect");
+    expect(googleSignInRejected({ ...rejected, error: "GM_CONNECT_FAILED" })).toBe(false);
+    expect(googleSignInRejected({ ...rejected, googleAuthenticated: true })).toBe(false);
+  });
   it("local Google sign-in stays bound to the separate setup listener and current one-time attempt", () => {
     const uri = new URL("rivet-pair://google");
     const id = "00000000-0000-4000-8000-000000000001";

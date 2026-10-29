@@ -41,6 +41,8 @@ expired; a scope shortfall requires broader grants rather than the same login.
 Execution errors produce
 bounded diagnostics without persisting arbitrary error content.
 
+A rejected saved sign-in is retained and requires the service owner to reconnect Google Messages. The panel does not offer replacement pairing while a saved session exists. Temporary connection failures remain retryable.
+
 ## Validate with synthetic fixtures
 
 Run scoped Vitest tests in `apps/host-selfhost` for `rivet-setup*.test.ts` and
@@ -50,7 +52,7 @@ production build.
 
 The recorded browser scenario uses the native Rivet producer fixture. In a disposable
 Rivet checkout, set `RIVET_SETUP_DEMO_DIR` to a new private directory under `/tmp`
-and run `tsx scripts/setup-demo.ts`. Its `ready.json` provides the loopback endpoint.
+and run `tsx scripts/setup-native-demo.ts`. Its `ready.json` provides the loopback endpoint.
 Set `E2E_RIVET_SETUP_DIRECTORY`, `E2E_RIVET_SETUP_URL`, and
 `EXECUTOR_RIVET_SETUP_CONFIG_FILE` to that fixture's directory, URL, and a new JSON
 file inside the directory. Trust only the new fixture certificate by starting the

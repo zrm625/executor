@@ -6,6 +6,7 @@ import {
   decodeSetupStatus,
   setupActive,
   setupInstruction,
+  googleSignInRejected,
   localSignInUrl,
   type SetupStatus,
 } from "./rivet-setup-state";
@@ -151,6 +152,7 @@ export function RivetSetupPanel(props: { readonly integration: string }) {
     ) : null;
   const active = setupActive(status);
   const handoff = localSignInUrl(status);
+  const rejected = googleSignInRejected(status);
 
   return (
     <section aria-label="Rivet setup" className="space-y-4 rounded-lg border border-border p-4">
@@ -164,9 +166,11 @@ export function RivetSetupPanel(props: { readonly integration: string }) {
           <strong>
             {status.googleAuthenticated
               ? "Authenticated"
-              : status.googleConfigured
-                ? "Needs pairing or verification"
-                : "Not configured"}
+              : rejected
+                ? "Sign-in expired"
+                : status.googleConfigured
+                  ? "Needs pairing or verification"
+                  : "Not configured"}
           </strong>
         </span>
       </div>
@@ -177,11 +181,14 @@ export function RivetSetupPanel(props: { readonly integration: string }) {
             className="inline-block rounded-md border border-border px-3 py-2 text-sm"
             href={handoff}
           >
-            Sign in with Google passkey
+            Open Google sign-in on this computer
           </a>
           <p className="text-xs text-muted-foreground">
-            Opens the Rivet helper in a fresh local Chrome session. Keep your phone nearby with
-            Bluetooth enabled. This one-time link expires in ten minutes.
+            Requires the Rivet helper and Chromium installed on this computer. Use your phone's
+            passkey, then confirm the Messages emoji. This one-time link expires in ten minutes.
+          </p>
+          <p className="text-xs text-muted-foreground">
+            On a phone? Open this Accounts page on your computer to complete Google sign-in.
           </p>
         </div>
       ) : null}

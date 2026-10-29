@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { writeFileSync, rmSync } from "node:fs";
+import { writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { expect } from "@effect/vitest";
 import { Effect } from "effect";
@@ -42,6 +42,13 @@ scenario(
     });
     yield* Effect.gen(function* () {
       writeFileSync(join(directory, "owner-id"), session.user.id, { mode: 0o600 });
+      yield* Effect.promise(async () => {
+        const deadline = Date.now() + 10000;
+        while (!existsSync(join(directory, "native-ready.json"))) {
+          if (Date.now() > deadline) throw new Error("Native fixture did not become ready");
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      });
       writeFileSync(
         configFile,
         JSON.stringify({
@@ -85,7 +92,7 @@ scenario(
         });
         await step("Start local Google sign-in and cancel the attempt", async () => {
           await page.getByRole("button", { name: "Connect Google Messages", exact: true }).click();
-          await page.getByRole("link", { name: "Sign in with Google passkey" }).waitFor();
+          await page.getByRole("link", { name: "Open Google sign-in on this computer" }).waitFor();
           await page.getByRole("button", { name: "Cancel setup", exact: true }).click();
           await page
             .getByRole("button", { name: "Connect Google Messages", exact: true })
@@ -101,7 +108,7 @@ scenario(
               .getByRole("button", { name: "Connect Google Messages", exact: true })
               .click();
 
-            const link = page.getByRole("link", { name: "Sign in with Google passkey" });
+            const link = page.getByRole("link", { name: "Open Google sign-in on this computer" });
             await link.waitFor();
             const uri = new URL((await link.getAttribute("href"))!);
             expect(uri.protocol).toBe("rivet-pair:");
@@ -151,6 +158,21 @@ scenario(
           await page.getByRole("button", { name: "Check connections", exact: true }).click();
           await page.getByText("Authenticated", { exact: true }).waitFor();
         });
+        await step("Retain a rejected saved session at phone width", async () => {
+          await page.setViewportSize({ width: 390, height: 844 });
+          writeFileSync(join(directory, "gmessages", "reject.synthetic"), "", { mode: 0o600 });
+          await page.getByRole("button", { name: "Check connections", exact: true }).click();
+          await page.getByText("Sign-in expired", { exact: true }).waitFor();
+          await page.getByText(/Ask the service owner to reconnect/).waitFor();
+          expect(
+            await page
+              .getByRole("button", { name: "Connect Google Messages", exact: true })
+              .count(),
+          ).toBe(0);
+          expect(
+            await page.getByRole("link", { name: "Open Google sign-in on this computer" }).count(),
+          ).toBe(0);
+        });
       });
     }).pipe(
       Effect.ensuring(
@@ -161,6 +183,7 @@ scenario(
             join(directory, "owner-id"),
             join(directory, "connect-phone.synthetic"),
             join(directory, "gmessages", "confirm.synthetic"),
+            join(directory, "gmessages", "reject.synthetic"),
           ])
             rmSync(file, { force: true });
           writeFileSync(join(directory, "setup.token"), "b".repeat(64), { mode: 0o600 });
