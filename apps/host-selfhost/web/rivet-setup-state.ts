@@ -36,6 +36,11 @@ export const setupActive = (status: SetupStatus) =>
   status.google !== null &&
   ["starting", "sign_in", "phone_confirmation", "verifying"].includes(status.google.state);
 
+export const googleSignInRejected = (status: SetupStatus) =>
+  status.googleSessionPresent &&
+  !status.googleAuthenticated &&
+  status.error === "GM_REPAIR_REQUIRED";
+
 export function localSignInUrl(status: SetupStatus): string | null {
   if (
     status.google?.method !== "local-browser" ||
@@ -84,7 +89,7 @@ export function setupInstruction(status: SetupStatus): string {
     (status.google?.state === "sign_in" || status.google?.state === "starting") &&
     status.google.method === "local-browser"
   )
-    return "Open Google sign-in on a nearby computer. Use your phone's passkey in Chrome, then confirm the Messages emoji here.";
+    return "Open Google sign-in on a nearby computer. Use your phone's passkey in Chromium, then confirm the Messages emoji here.";
   if (status.google?.state === "phone_confirmation")
     return "Open Google Messages on your phone and confirm the matching emoji.";
   if (status.google?.state === "sign_in" || status.google?.state === "starting")
@@ -93,6 +98,8 @@ export function setupInstruction(status: SetupStatus): string {
     return "Verifying Google Messages authentication without fetching history.";
   if (status.google?.state === "failed" && !status.googleSessionPresent)
     return "Google Messages pairing did not finish. Retry when you are ready.";
+  if (googleSignInRejected(status))
+    return "Google rejected your saved sign-in. Ask the service owner to reconnect Google Messages. Your saved session and history are retained.";
   if (!status.phoneConnected)
     return "Connect your phone: scan the pairing QR in Rivet, review the address, then Save and connect.";
   if (status.googleConfigured && !status.googleAuthenticated)
