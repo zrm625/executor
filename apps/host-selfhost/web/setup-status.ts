@@ -1,3 +1,5 @@
+import { Effect, Option, Schema } from "effect";
+
 // Pre-login check of whether the instance still needs first-run setup (its one
 // org has zero members). Read by the auth gate to choose the setup vs sign-in
 // screen. A plain same-origin fetch — the same boundary the /join + setup
@@ -14,18 +16,31 @@ export class SetupStatusError extends Error {
   }
 }
 
-export const fetchNeedsSetup = async (): Promise<boolean> => {
+const SetupStatusSchema = Schema.Struct({
+  needsSetup: Schema.Boolean,
+  oidcEnabled: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false))),
+  oidcProviderName: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed("SSO"))),
+  passwordSignInEnabled: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(true))),
+});
+
+export type SetupStatus = typeof SetupStatusSchema.Type;
+const decodeSetupStatus = Schema.decodeUnknownOption(SetupStatusSchema);
+
+export const fetchSetupStatus = async (): Promise<SetupStatus> => {
   for (let attempt = 0; attempt < retryDelaysMs.length; attempt += 1) {
     const response = await fetch("/api/setup-status", { credentials: "same-origin" }).then(
       (r) => r,
       () => null,
     );
     if (response?.ok) {
-      const data = (await response.json().then(
-        (d) => d,
-        () => ({}),
-      )) as { needsSetup?: boolean };
-      return data.needsSetup === true;
+      const data: unknown = await response.json().then(
+        (d: unknown) => d,
+        () => null,
+      );
+      const parsed = decodeSetupStatus(data);
+      if (Option.isSome(parsed)) {
+        return parsed.value;
+      }
     }
     if (attempt < retryDelaysMs.length - 1) await sleep(retryDelaysMs[attempt]);
   }

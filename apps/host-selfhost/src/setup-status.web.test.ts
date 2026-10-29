@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 
-import { SetupStatusError, fetchNeedsSetup } from "../web/setup-status";
+import { SetupStatusError, fetchSetupStatus } from "../web/setup-status";
 
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe("fetchNeedsSetup", () => {
-  it("returns false when the server says setup is complete", async () => {
+describe("fetchSetupStatus", () => {
+  it("keeps password login for servers without optional authentication fields", async () => {
     vi.stubGlobal(
       "fetch",
       async () =>
@@ -17,7 +17,30 @@ describe("fetchNeedsSetup", () => {
         }),
     );
 
-    await expect(fetchNeedsSetup()).resolves.toBe(false);
+    await expect(fetchSetupStatus()).resolves.toEqual({
+      needsSetup: false,
+      oidcEnabled: false,
+      oidcProviderName: "SSO",
+      passwordSignInEnabled: true,
+    });
+  });
+
+  it("preserves the configured SSO provider and disabled passwords", async () => {
+    const status = {
+      needsSetup: false,
+      oidcEnabled: true,
+      oidcProviderName: "Example SSO",
+      passwordSignInEnabled: false,
+    };
+    vi.stubGlobal("fetch", async () => Response.json(status));
+    await expect(fetchSetupStatus()).resolves.toEqual(status);
+  });
+
+  it("does not render a login method from an invalid successful response", async () => {
+    vi.stubGlobal("fetch", async () =>
+      Response.json({ needsSetup: false, passwordSignInEnabled: "false" }),
+    );
+    await expect(fetchSetupStatus()).rejects.toBeInstanceOf(SetupStatusError);
   });
 
   it("retries failed setup checks before surfacing an error", async () => {
@@ -27,7 +50,7 @@ describe("fetchNeedsSetup", () => {
       return new Response("unavailable", { status: 503 });
     });
 
-    await expect(fetchNeedsSetup()).rejects.toBeInstanceOf(SetupStatusError);
+    await expect(fetchSetupStatus()).rejects.toBeInstanceOf(SetupStatusError);
     expect(calls).toBe(3);
   });
 });
